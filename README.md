@@ -11,14 +11,14 @@ SeekCode is an orchestration layer that brings AI-assisted coding to your termin
 
 ## Features
 
-- 🔍 **Project Analysis** – AST-based parsing, dependency graph generation, and project metadata extraction
-- 📋 **Multi-step Planning** – Decompose complex tasks into actionable, ordered steps
-- 🤖 **AI Orchestration** – Leverages DeepSeek Web Gateway for intelligent code generation and reasoning
-- 🛠️ **Smart Refactoring** – Safe rename operations, find usages, and targeted code modifications
-- ✅ **Test Integration** – Run and validate tests after AI-driven changes
-- 📦 **Git Integration** – Automatic commits and branch management
-- 💾 **Session Memory** – Cached project analysis for faster subsequent runs
-- 🖥️ **Interactive Mode** – Chat-like interface for continuous task execution
+- **Project Analysis** : AST-based parsing, dependency graph generation, and project metadata extraction
+- **Multi-step Planning** : Decompose complex tasks into actionable, ordered steps
+- **AI Orchestration** : Leverages DeepSeek Web Gateway for intelligent code generation and reasoning
+- **Smart Refactoring** : Safe rename operations, find usages, and targeted code modifications
+- **Test Integration** : Run and validate tests after AI-driven changes
+- **Git Integration** : Automatic commits and branch management
+- **Session Memory** : Cached project analysis for faster subsequent runs
+- **Interactive Mode** : Chat-like interface for continuous task execution
 
 ## Prerequisites
 

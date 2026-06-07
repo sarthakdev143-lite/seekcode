@@ -12,3 +12,4 @@ build/
 codebase.txt
 $null
 .seekcode/
+package-lock.json
