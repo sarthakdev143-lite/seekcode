@@ -23,13 +23,13 @@ SeekCode is an orchestration layer that brings AI-assisted coding to your termin
 ## Prerequisites
 
 - Node.js 18 or higher
-- [DeepSeek Web Gateway](https://github.com/yourusername/deepseek-web-gateway) as a sibling directory (for AI capabilities)
+- [DeepSeek Web Gateway](https://github.com/sarthakdev143-lite/deepseek-web-gateway) as a sibling directory (for AI capabilities)
 
 ## Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/seekcode.git
+git clone https://github.com/sarthakdev143-lite/seekcode.git
 cd seekcode
 
 # Install dependencies
