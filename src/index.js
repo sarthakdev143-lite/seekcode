@@ -1,0 +1,16 @@
+﻿const logger = require('./logger');
+console.log('');
+logger.header('SeekCode v0.1.0 - Complete AI Coding Orchestrator');
+console.log('  Commands:');
+console.log('    node src/analyze.js <project>            - Analyze project structure');
+console.log('    node src/plan.js <project> <task>        - Generate a task plan');
+console.log('    node src/orchestrate.js <project> <task> - Full execution (needs gateway on :8080)');
+console.log('');
+console.log('  Modules:');
+console.log('    - Project analyzer (AST, dependency graph)');
+console.log('    - Task planner (multi-step decomposition)');
+console.log('    - Smart refactoring tools (safe rename, find usages)');
+console.log('    - Test runner integration');
+console.log('    - Git integration (auto commit)');
+console.log('    - Session memory (cached project maps)');
+console.log('');

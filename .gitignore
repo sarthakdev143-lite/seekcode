@@ -1,0 +1,13 @@
+node_modules/
+*.log
+.env
+.DS_Store
+coverage/
+.vscode/
+.idea/
+dist/
+build/
+*.tmp
+.codebuddy/
+codebase.txt
+$null
