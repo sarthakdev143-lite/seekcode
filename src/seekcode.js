@@ -12,7 +12,7 @@ const { ProjectAnalyzer } = require('./analyzer/ProjectAnalyzer');
 
 // ---------- Gateway Manager ----------
 const GATEWAY_PORT = 8080;
-const GATEWAY_PATH = path.resolve(__dirname, '..', 'deepseek-web-gateway', 'src', 'server.js');
+const GATEWAY_PATH = path.resolve(__dirname, '..', '..', 'deepseek-web-gateway', 'src', 'server.js');
 let gatewayProcess = null;
 
 function healthCheck() {
@@ -87,7 +87,7 @@ async function interactiveMode_old() {
   await analyzer.analyze();
   logger.success('Project loaded: ' + analyzer.getSummary().project);
 
-  const ask = () => new Promise(resolve => rl.question('\n\x1b[96mâ¯ Task:\x1b[0m ', resolve));
+  const ask = () => new Promise(resolve => rl.question('\n\x1b[96mÃ¢ÂÂ¯ Task:\x1b[0m ', resolve));
 
   while (true) {
     const task = (await ask()).trim();
