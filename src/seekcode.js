@@ -71,7 +71,7 @@ function stopGateway() {
 }
 
 // ---------- Interactive Mode ----------
-async function interactiveMode() {
+async function interactiveMode_old() {
   const readline = require('readline');
   const rl = readline.createInterface({
     input: process.stdin,
@@ -87,7 +87,7 @@ async function interactiveMode() {
   await analyzer.analyze();
   logger.success('Project loaded: ' + analyzer.getSummary().project);
 
-  const ask = () => new Promise(resolve => rl.question('\n\x1b[96m❯ Task:\x1b[0m ', resolve));
+  const ask = () => new Promise(resolve => rl.question('\n\x1b[96mâ¯ Task:\x1b[0m ', resolve));
 
   while (true) {
     const task = (await ask()).trim();
@@ -150,7 +150,7 @@ if (process.argv.length === 2) {
   (async () => {
     const gatewayReady = await startGatewayIfNeeded();
     if (!gatewayReady) process.exit(1);
-    await interactiveMode().finally(() => {
+    await require('./interactive').interactiveMode(process.cwd()).finally(() => {
       stopGateway();
       process.exit(0);
     });
