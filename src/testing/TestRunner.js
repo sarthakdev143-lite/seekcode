@@ -1,4 +1,4 @@
-﻿const { execSync } = require('child_process');
+const { execSync } = require('child_process');
 const path = require('path');
 const logger = require('../logger');
 
@@ -15,7 +15,7 @@ class TestRunner {
       if (pkg.scripts && pkg.scripts.test) return 'npm test';
       if (pkg.scripts && pkg.scripts['test:unit']) return 'npm run test:unit';
     } catch {}
-    return 'npx jest --passWithNoTests 2>$null';
+    return 'npx jest --passWithNoTests 2>NUL';
   }
 
   async run() {

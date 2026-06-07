@@ -1,4 +1,4 @@
-const path = require('path');
+﻿const path = require('path');
 const { ProjectAnalyzer } = require('../analyzer/ProjectAnalyzer');
 const { TaskPlanner } = require('../planner/TaskPlanner');
 const { GatewayClient } = require('../gateway-client');
@@ -28,7 +28,7 @@ class EnhancedOrchestrator {
     await this.analyzer.analyze();
     this.session.storeProjectMap(this.analyzer.getSummary());
 
-    this.planner = new TaskPlanner(this.analyzer);
+    this.planner = new TaskPlanner(this.analyzer, this.gateway);
     this.refactorEngine = new RefactorEngine(this.analyzer);
     this.testRunner = new TestRunner(this.projectPath);
     this.gitManager = new GitManager(this.projectPath);
@@ -37,6 +37,21 @@ class EnhancedOrchestrator {
 
   async run(task) {
     const plan = await this.planner.plan(task);
+
+    // ---- Quick answer (question, no action needed) ----
+    if (plan.quickAnswer) {
+      const summary = this.analyzer.getSummary();
+      const files = this.analyzer.getDependencyGraph().getAllFiles();
+      const answer =
+        'Project: ' + summary.project +
+        '\nFramework: ' + (summary.meta.framework || 'none') +
+        '\nLanguage: ' + summary.meta.language +
+        '\nFiles: ' + files.length + ' source files' +
+        '\nTop-level modules: ' + files.filter(f => !f.includes('/')).join(', ');
+      try { await this.gateway.closeSession(); } catch {}
+      return answer;
+    }
+
     logger.header('Execution Plan');
     plan.steps.forEach((s, i) => console.log('  ' + (i+1) + '. ' + s));
 
@@ -51,6 +66,7 @@ class EnhancedOrchestrator {
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
       logger.header('Step ' + (i+1) + '/' + plan.steps.length + ': ' + step.substring(0, 80));
+
       const prompt = [
         'You are SeekCode, executing a step in a larger task.',
         'PROJECT CONTEXT: ' + context,
@@ -73,7 +89,7 @@ class EnhancedOrchestrator {
       logger.info('Running test suite...');
       const testResult = await this.testRunner.run();
       if (testResult.success) logger.success('All tests passed');
-      else logger.warn('Tests failed Ã¢â‚¬â€ see output');
+      else logger.warn('Tests failed — see output');
       finalResult += '\nTests: ' + (testResult.success ? 'PASSED' : 'FAILED') + '\n' + testResult.output;
     }
 
@@ -84,7 +100,7 @@ class EnhancedOrchestrator {
     }
 
     this.session.rememberTask(task, finalResult.substring(0, 500));
-    try { try { await this.gateway.closeSession(); } catch (e) { /* ignore */ }; } catch (e) { /* ignore */ };
+    try { await this.gateway.closeSession(); } catch {}
     return finalResult;
   }
 }

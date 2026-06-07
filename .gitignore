@@ -11,3 +11,4 @@ build/
 .codebuddy/
 codebase.txt
 $null
+.seekcode/
