@@ -70,45 +70,6 @@ function stopGateway() {
   }
 }
 
-// ---------- Interactive Mode ----------
-async function interactiveMode_old() {
-  const readline = require('readline');
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-  });
-
-  // Analyze current project once
-  logger.header('SeekCode Interactive');
-  const projectDir = process.cwd();
-  logger.info('Analyzing current project...');
-  const analyzer = new ProjectAnalyzer(projectDir);
-  await analyzer.analyze();
-  logger.success('Project loaded: ' + analyzer.getSummary().project);
-
-  const ask = () => new Promise(resolve => rl.question('\n\x1b[96mÃ¢ÂÂ¯ Task:\x1b[0m ', resolve));
-
-  while (true) {
-    const task = (await ask()).trim();
-    if (!task) continue;
-    if (['exit', 'quit', 'q'].includes(task.toLowerCase())) break;
-
-    // Run orchestrator with this task
-    try {
-      const { EnhancedOrchestrator } = require('./orchestrator/EnhancedOrchestrator');
-      const orchestrator = new EnhancedOrchestrator(projectDir);
-      await orchestrator.init();
-      const result = await orchestrator.run(task);
-      console.log('\n' + result);
-    } catch (err) {
-      logger.error('Task failed: ' + err.message);
-    }
-  }
-
-  rl.close();
-}
-
 // ---------- CLI Commands ----------
 program
   .name('seekcode')

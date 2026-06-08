@@ -1,0 +1,12 @@
+.seekcode/
+node_modules/
+.codebase.txt
+*.log
+.DS_Store
+*.tgz
+coverage/
+.nyc_output/
+test/
+examples/
+*.md
+!README.md
