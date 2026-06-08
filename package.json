@@ -1,5 +1,5 @@
 {
-  "name": "seekcode",
+  "name": "seekcode-cli",
   "version": "0.1.0",
   "description": "Orchestration layer for AI coding – project intelligence, multi-step planning, smart tools, powered by DeepSeek Web Gateway",
   "main": "src/index.js",
@@ -12,6 +12,7 @@
     "prepublishOnly": "node src/analyze.js . && echo '✅ Pre-publish checks passed'"
   },
   "dependencies": {
+    "deepseek-web-gateway": "^1.0.0",
     "commander": "^15.0.0",
     "fast-glob": "^3.3.2",
     "ignore": "^5.3.1",

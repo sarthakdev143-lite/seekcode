@@ -12,7 +12,7 @@ const { ProjectAnalyzer } = require('./analyzer/ProjectAnalyzer');
 
 // ---------- Gateway Manager ----------
 const GATEWAY_PORT = 8080;
-const GATEWAY_PATH = path.resolve(__dirname, '..', '..', 'deepseek-web-gateway', 'src', 'server.js');
+const GATEWAY_PATH = require.resolve('deepseek-web-gateway/src/server.js');
 let gatewayProcess = null;
 
 function healthCheck() {
