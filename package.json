@@ -7,6 +7,10 @@
     "seekcode": "src/seekcode.js"
   },
   "scripts": {
+    "release:patch": "node scripts/publish.js patch",
+    "release:minor": "node scripts/publish.js minor",
+    "release:major": "node scripts/publish.js major",
+    "release": "node scripts/publish.js",
     "analyze": "node src/analyze.js",
     "start": "node src/index.js",
     "prepublishOnly": "node src/analyze.js . && echo '✅ Pre-publish checks passed'"
