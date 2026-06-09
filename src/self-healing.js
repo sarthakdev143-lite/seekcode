@@ -1,3 +1,5 @@
+'use strict';
+const fs = require('fs').promises;
 // src/self-healing.js — Self-healing mechanisms for orchestration layer
 'use strict';
 
@@ -17,7 +19,7 @@ class SelfHealingOrchestrator {
 
   initCheckpoints() {
     try {
-      fs.mkdirSync(this.checkpointDir, { recursive: true });
+      await fs.promises.mkdir(this.checkpointDir, { recursive: true });
     } catch (err) {
       logger.warn(`Failed to create checkpoint directory: ${err.message}`);
     }
@@ -47,7 +49,7 @@ class SelfHealingOrchestrator {
         data: data,
         version: '1.0'
       };
-      fs.writeFileSync(checkpointFile, JSON.stringify(checkpoint, null, 2));
+      await fs.promises.writeFile(checkpointFile, JSON.stringify(checkpoint, null, 2));
       logger.dim(`Checkpoint created: ${path.basename(checkpointFile)}`);
       return checkpointFile;
     } catch (err) {
@@ -66,7 +68,7 @@ class SelfHealingOrchestrator {
       if (files.length === 0) return null;
       
       const latestFile = path.join(this.checkpointDir, files[0]);
-      const checkpoint = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
+      const checkpoint = JSON.parse(await fs.promises.readFile(latestFile, 'utf8'));
       logger.info(`Restored checkpoint: ${path.basename(latestFile)}`);
       return checkpoint.data;
     } catch (err) {
@@ -78,8 +80,8 @@ class SelfHealingOrchestrator {
   async logFailure(context, error) {
     try {
       let failures = [];
-      if (fs.existsSync(this.failureLog)) {
-        failures = JSON.parse(fs.readFileSync(this.failureLog, 'utf8'));
+      if (await fs.promises.access(this.failureLog)) {
+        failures = JSON.parse(await fs.promises.readFile(this.failureLog, 'utf8'));
       }
       
       failures.push({
@@ -93,7 +95,7 @@ class SelfHealingOrchestrator {
       // Keep last 100 failures
       if (failures.length > 100) failures = failures.slice(-100);
       
-      fs.writeFileSync(this.failureLog, JSON.stringify(failures, null, 2));
+      await fs.promises.writeFile(this.failureLog, JSON.stringify(failures, null, 2));
     } catch (err) {
       logger.warn(`Failed to log failure: ${err.message}`);
     }
@@ -101,9 +103,9 @@ class SelfHealingOrchestrator {
 
   async analyzeFailures() {
     try {
-      if (!fs.existsSync(this.failureLog)) return { total: 0, patterns: [] };
+      if (!await fs.promises.access(this.failureLog)) return { total: 0, patterns: [] };
       
-      const failures = JSON.parse(fs.readFileSync(this.failureLog, 'utf8'));
+      const failures = JSON.parse(await fs.promises.readFile(this.failureLog, 'utf8'));
       const patterns = {};
       
       failures.forEach(f => {
@@ -135,8 +137,8 @@ class SelfHealingOrchestrator {
       // Restore backed up files
       if (originalState && originalState.backups) {
         for (const [file, backup] of Object.entries(originalState.backups)) {
-          if (fs.existsSync(backup)) {
-            fs.copyFileSync(backup, file);
+          if (await fs.promises.access(backup)) {
+            await fs.promises.copyFile(backup, file);
             logger.dim(`Restored: ${file}`);
           }
         }
@@ -160,13 +162,13 @@ class SelfHealingOrchestrator {
   async createBackup(files) {
     const backups = {};
     const backupDir = path.join(this.projectPath, '.seekcode', 'backups', Date.now().toString());
-    fs.mkdirSync(backupDir, { recursive: true });
+    await fs.promises.mkdir(backupDir, { recursive: true });
     
     for (const file of files) {
       const absPath = path.resolve(this.projectPath, file);
-      if (fs.existsSync(absPath)) {
+      if (await fs.promises.access(absPath)) {
         const backupPath = path.join(backupDir, path.basename(file));
-        fs.copyFileSync(absPath, backupPath);
+        await fs.promises.copyFile(absPath, backupPath);
         backups[absPath] = backupPath;
       }
     }
@@ -184,7 +186,7 @@ class SelfHealingOrchestrator {
         const filePath = path.join(this.checkpointDir, file);
         const stats = fs.statSync(filePath);
         if (now - stats.mtimeMs > maxAge) {
-          fs.unlinkSync(filePath);
+          await fs.promises.unlink(filePath);
           deleted++;
         }
       }
