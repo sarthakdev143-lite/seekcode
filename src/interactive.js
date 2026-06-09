@@ -25,7 +25,10 @@ async function interactiveMode(projectPath) {
       const start = Date.now();
       const response = await agent.handle(input);
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-      console.log('\n\x1b[90m(' + elapsed + 's)\x1b[0m');
+      console.log('\n' + '─'.repeat(50));           
+      console.log(response);                         
+      console.log('─'.repeat(50));
+      console.log(`\x1b[90m(${elapsed}s)\x1b[0m`); 
     } catch (err) {
       logger.error('Error: ' + err.message);
     }
