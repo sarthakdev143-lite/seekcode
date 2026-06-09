@@ -3,6 +3,10 @@ const { classify, INTENTS } = require('../intent/classifier');
 const { ProjectAnalyzer } = require('../analyzer/ProjectAnalyzer');
 const config = require('../config');
 const logger = require('../logger');
+let TraceLogger = null;
+try {
+  TraceLogger = require('../trace-logger').TraceLogger;
+} catch (e) {}
 
 class SeekCodeAgent {
   constructor(projectPath) {
@@ -10,6 +14,14 @@ class SeekCodeAgent {
     this.gateway = new GatewayClient();
     this.analyzer = null;
     this.conversationHistory = [];  // keep context across turns
+    this.traceLogger = null;
+    
+    // Initialize trace logger if SEEKCODE_TRACE is enabled
+    if (process.env.SEEKCODE_TRACE === '1' && TraceLogger) {
+      const sessionId = `agent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      this.traceLogger = new TraceLogger(sessionId);
+      this.traceLogger.logEvent('agent_init', { projectPath });
+    }
   }
 
   async init() {
@@ -19,8 +31,39 @@ class SeekCodeAgent {
     logger.success('Agent ready. Project: ' + this.analyzer.getSummary().project);
   }
 
+  async _callLLMWithTrace(prompt, handlerName) {
+    if (!this.traceLogger) {
+      return await this.gateway.chat(prompt);
+    }
+    
+    const turnId = `${handlerName}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const startTime = Date.now();
+    
+    try {
+      const response = await this.gateway.chat(prompt);
+      const duration = Date.now() - startTime;
+      
+      this.traceLogger.logLLMTurn(turnId, prompt, response, duration, {
+        handler: handlerName,
+        intent: this._currentIntent
+      });
+      
+      return response;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      this.traceLogger.logEvent('llm_error', {
+        turnId,
+        handler: handlerName,
+        durationMs: duration,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
   async handle(input) {
     const intent = classify(input, this.analyzer.getSummary());
+    this._currentIntent = intent;
 
     switch (intent) {
       case INTENTS.GREETING:
@@ -65,7 +108,7 @@ class SeekCodeAgent {
       'Answer in 1-3 short paragraphs. No tool calls unless needed to read a file.'
     ].join('\n');
 
-    const response = await this.gateway.chat(prompt);
+    const response = await this._callLLMWithTrace(prompt, '_handleQuestion');
     this._addToHistory('user', input);
     this._addToHistory('assistant', response);
     return response;
@@ -88,7 +131,7 @@ class SeekCodeAgent {
       'Do one thing at a time. After completing the edit, provide a brief summary.'
     ].join('\n');
 
-    const response = await this.gateway.chat(prompt);
+    const response = await this._callLLMWithTrace(prompt, '_handleSingleEdit');
     this._addToHistory('user', input);
     this._addToHistory('assistant', response);
     return response;
@@ -113,7 +156,7 @@ class SeekCodeAgent {
       'You have full access to the filesystem. Be thorough but efficient.'
     ].join('\n');
 
-    const response = await this.gateway.chat(prompt);
+    const response = await this._callLLMWithTrace(prompt, '_handleMultiStep');
     this._addToHistory('user', input);
     this._addToHistory('assistant', response);
     return response;
@@ -136,7 +179,7 @@ class SeekCodeAgent {
       'Respond helpfully. If you need to read or edit files, use the tools. If it is a simple conversation, just reply.'
     ].join('\n');
 
-    const response = await this.gateway.chat(prompt);
+    const response = await this._callLLMWithTrace(prompt, '_handleChat');
     this._addToHistory('user', input);
     this._addToHistory('assistant', response);
     return response;
@@ -158,6 +201,9 @@ class SeekCodeAgent {
 
   async shutdown() {
     try { await this.gateway.closeSession(); } catch {}
+    if (this.traceLogger) {
+      this.traceLogger.close();
+    }
   }
 }
 

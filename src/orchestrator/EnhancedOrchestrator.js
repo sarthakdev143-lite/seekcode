@@ -1,4 +1,3 @@
-
 // Global error boundary for EnhancedOrchestrator.js
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -18,7 +17,7 @@ process.on('uncaughtException', (error) => {
     process.exit(1);
   }
 });
-﻿const path = require('path');
+const path = require('path');
 const { ProjectAnalyzer } = require('../analyzer/ProjectAnalyzer');
 const { TaskPlanner } = require('../planner/TaskPlanner');
 const { GatewayClient } = require('../gateway-client');
@@ -27,6 +26,10 @@ const { TestRunner } = require('../testing');
 const { GitManager } = require('../git');
 const { SessionMemory } = require('../session');
 const logger = require('../logger');
+let TraceLogger = null;
+try {
+  TraceLogger = require('../trace-logger').TraceLogger;
+} catch (e) {}
 
 class EnhancedOrchestrator {
   constructor(projectPath) {
@@ -38,6 +41,14 @@ class EnhancedOrchestrator {
     this.refactorEngine = null;
     this.testRunner = null;
     this.gitManager = null;
+    this.traceLogger = null;
+    
+    // Initialize trace logger if SEEKCODE_TRACE is enabled
+    if (process.env.SEEKCODE_TRACE === '1' && TraceLogger) {
+      const sessionId = `orchestrator_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      this.traceLogger = new TraceLogger(sessionId);
+      this.traceLogger.logEvent('orchestrator_init', { projectPath });
+    }
   }
 
   async init() {
@@ -53,10 +64,29 @@ class EnhancedOrchestrator {
     this.testRunner = new TestRunner(this.projectPath);
     this.gitManager = new GitManager(this.projectPath);
     logger.success('Enhanced orchestrator initialized');
+    
+    if (this.traceLogger) {
+      this.traceLogger.logEvent('init_complete', { 
+        projectSummary: this.analyzer.getSummary() 
+      });
+    }
   }
 
   async run(task) {
+    if (this.traceLogger) {
+      this.traceLogger.logEvent('run_start', { task });
+    }
+    
+    const planStartTime = Date.now();
     const plan = await this.planner.plan(task);
+    const planDuration = Date.now() - planStartTime;
+
+    if (this.traceLogger) {
+      this.traceLogger.logStep('planning', 'Generate task plan', 'complete', planDuration, {
+        stepsCount: plan.steps?.length || 0,
+        hasQuickAnswer: !!plan.quickAnswer
+      });
+    }
 
     // ---- Quick answer (question, no action needed) ----
     if (plan.quickAnswer) {
@@ -69,6 +99,11 @@ class EnhancedOrchestrator {
         '\nFiles: ' + files.length + ' source files' +
         '\nTop-level modules: ' + files.filter(f => !f.includes('/')).join(', ');
       try { await this.gateway.closeSession(); } catch {}
+      
+      if (this.traceLogger) {
+        this.traceLogger.logEvent('quick_answer', { answer: answer.substring(0, 200) });
+        this.traceLogger.close();
+      }
       return answer;
     }
 
@@ -85,6 +120,13 @@ class EnhancedOrchestrator {
 
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
+      const stepStartTime = Date.now();
+      const stepId = `step_${i+1}`;
+      
+      if (this.traceLogger) {
+        this.traceLogger.logStep(stepId, step, 'start', null, { stepIndex: i+1, totalSteps: plan.steps.length });
+      }
+      
       logger.header('Step ' + (i+1) + '/' + plan.steps.length + ': ' + step.substring(0, 80));
 
       const prompt = [
@@ -97,17 +139,45 @@ class EnhancedOrchestrator {
 
       try {
         const result = await this.gateway.chat(prompt);
+        const stepDuration = Date.now() - stepStartTime;
+        
+        if (this.traceLogger) {
+          this.traceLogger.logStep(stepId, step, 'complete', stepDuration, {
+            resultLength: result.length,
+            stepIndex: i+1
+          });
+        }
+        
         logger.success('Step ' + (i+1) + ' done');
         finalResult += 'Step ' + (i+1) + ': ' + step + '\n' + result + '\n\n';
       } catch (err) {
+        const stepDuration = Date.now() - stepStartTime;
+        
+        if (this.traceLogger) {
+          this.traceLogger.logStep(stepId, step, 'error', stepDuration, {
+            error: err.message,
+            stepIndex: i+1
+          });
+        }
+        
         logger.error('Step ' + (i+1) + ' failed: ' + err.message);
         finalResult += 'Step ' + (i+1) + ': ' + step + ' ERROR: ' + err.message + '\n\n';
       }
     }
 
     if (this.testRunner) {
+      const testStartTime = Date.now();
       logger.info('Running test suite...');
       const testResult = await this.testRunner.run();
+      const testDuration = Date.now() - testStartTime;
+      
+      if (this.traceLogger) {
+        this.traceLogger.logStep('testing', 'Run test suite', testResult.success ? 'complete' : 'error', testDuration, {
+          success: testResult.success,
+          outputLength: testResult.output?.length || 0
+        });
+      }
+      
       if (testResult.success) logger.success('All tests passed');
       else logger.warn('Tests failed — see output');
       finalResult += '\nTests: ' + (testResult.success ? 'PASSED' : 'FAILED') + '\n' + testResult.output;
@@ -117,10 +187,23 @@ class EnhancedOrchestrator {
       logger.info('Staging changes...');
       this.gitManager.stageAll();
       this.gitManager.commit('SeekCode: ' + task.substring(0, 72));
+      
+      if (this.traceLogger) {
+        this.traceLogger.logEvent('git_commit', { task: task.substring(0, 72) });
+      }
     }
 
     this.session.rememberTask(task, finalResult.substring(0, 500));
     try { await this.gateway.closeSession(); } catch {}
+    
+    if (this.traceLogger) {
+      this.traceLogger.logEvent('run_complete', { 
+        resultLength: finalResult.length,
+        stepsCompleted: plan.steps.length
+      });
+      this.traceLogger.close();
+    }
+    
     return finalResult;
   }
 }

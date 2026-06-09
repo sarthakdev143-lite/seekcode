@@ -94,8 +94,16 @@ program
 program
   .command('run [project] [task]')
   .description('Execute a task (auto-starts gateway)')
-  .action(async (project, task) => {
+  .option('--trace', 'Enable detailed tracing (logs to .seekcode/traces/)')
+  .action(async (project, task, options) => {
     if (!task) { console.error('Task required'); process.exit(1); }
+    
+    // Set trace environment variable if --trace flag is provided
+    if (options.trace) {
+      process.env.SEEKCODE_TRACE = '1';
+      logger.info('🔍 Tracing enabled - logs will be written to .seekcode/traces/');
+    }
+    
     const gatewayReady = await startGatewayIfNeeded();
     if (!gatewayReady) process.exit(1);
     try {
