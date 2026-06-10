@@ -172,7 +172,7 @@ MIT License – see [LICENSE](LICENSE) file for details.
 
 ## Acknowledgements
 
-- Built on [DeepSeek Web Gateway](https://github.com/yourusername/deepseek-web-gateway)
+- Built on [DeepSeek Web Gateway](https://github.com/sarthakdev143-lite/deepseek-web-gateway)
 - Uses [tree-sitter](https://tree-sitter.github.io/) for blazing-fast parsing
 
 ## Support
