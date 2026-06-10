@@ -16,6 +16,8 @@ class ProjectAnalyzer {
   }
 
   async analyze() {
+    this.graph = new DependencyGraph();
+    this.fileDetails = new Map();
     logger.info('Finding source files...');
     const files = await findSourceFiles(this.rootDir);
     logger.success('Found ' + files.length + ' source files');

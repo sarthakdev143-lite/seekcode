@@ -16,7 +16,13 @@ const { TaskManager } = require('./TaskManager');
 const { MetricsCollector } = require('./MetricsCollector');
 const { ExecutionJournal } = require('./ExecutionJournal');
 const { CheckpointManager } = require('./CheckpointManager');
-const { ErrorFingerprint } = require('../recovery/ErrorFingerprint');
+const { RepositoryMap } = require('../semantic/RepositoryMap');
+const { SemanticSearch } = require('../semantic/SemanticSearch');
+const { PlannerAgent } = require('../agent/PlannerAgent');
+const { ExecutorAgent } = require('../agent/ExecutorAgent');
+const { ValidatorAgent } = require('../agent/ValidatorAgent');
+const { RepairAgent } = require('../agent/RepairAgent');
+const { ReviewerAgent } = require('../agent/ReviewerAgent');
 const logger = require('../logger');
 
 let TraceLogger = null;
@@ -28,7 +34,6 @@ class EnhancedOrchestrator {
     this.gateway = new GatewayClient();
     this.session = new SessionMemory();
     this.executionLog = [];
-    this.repairFingerprints = new Map();
     this.traceLogger = null;
 
     if (process.env.SEEKCODE_TRACE === '1' && TraceLogger) {
@@ -49,6 +54,11 @@ class EnhancedOrchestrator {
     this.gitManager = new GitManager(this.projectPath);
     this.validator = new ValidationEngine(this.projectPath);
     this.metrics = new MetricsCollector(this.projectPath);
+    this.repositoryMap = new RepositoryMap(this.projectPath, this.analyzer);
+    this.repositoryMap.build();
+    this.semanticSearch = new SemanticSearch(this.repositoryMap);
+    this.plannerAgent = new PlannerAgent(this.planner, this.semanticSearch);
+    this.executorAgent = new ExecutorAgent(this.gateway);
 
     logger.success('Enhanced orchestrator initialized');
   }
@@ -68,7 +78,7 @@ class EnhancedOrchestrator {
       this.taskManager = new TaskManager(this.projectPath, pendingTaskId);
       plan = { steps: this.taskManager.state.steps.map(s => s.description) };
     } else {
-      plan = await this.planner.plan(task);
+      plan = await this.plannerAgent.plan(task);
       if (plan.quickAnswer) return this._quickAnswer();
 
       this.taskManager = new TaskManager(this.projectPath);
@@ -77,8 +87,12 @@ class EnhancedOrchestrator {
 
     this.journal = new ExecutionJournal(this.projectPath, this.taskManager.taskId);
     this.checkpoints = new CheckpointManager(this.projectPath, this.taskManager.taskId);
+    this.validatorAgent = new ValidatorAgent(this.validator, this.metrics, this.journal);
+    this.repairAgent = new RepairAgent(this.gateway, this.validatorAgent, { journal: this.journal, checkpoints: this.checkpoints });
+    this.reviewerAgent = new ReviewerAgent(this.gateway, this.semanticSearch);
     this.journal.record('task-start', { task, plan: plan.steps });
     this.journal.record('confidence-evidence', this._confidenceEvidence(plan));
+    if (plan.relatedFiles) this.journal.record('semantic-context', { relatedFiles: plan.relatedFiles });
 
     logger.header(pendingTaskId ? 'Resuming Execution Plan' : 'Execution Plan');
     plan.steps.forEach((s, i) => {
@@ -97,23 +111,40 @@ class EnhancedOrchestrator {
       }
 
       logger.header('Final Validation');
-      const finalValidation = await this.validator.validate();
-      this.metrics.recordValidation(finalValidation);
-      this.journal.record('final-validation', { success: finalValidation.success, phase: finalValidation.phase, error: finalValidation.error });
+      const finalValidation = await this.validatorAgent.validate({ source: 'final' });
+      const allChangedFiles = this.executionLog.flatMap(entry => entry.changedFiles || []);
+      let review = finalValidation.success
+        ? await this.reviewerAgent.review(task, baseContext, Array.from(new Set(allChangedFiles)))
+        : { passed: false, findings: ['Skipped review because validation failed'] };
+      this.journal.record('review', review);
+      let reviewRepairSucceeded = false;
 
-      if (finalValidation.success) {
+      if (finalValidation.success && !review.passed) {
+        reviewRepairSucceeded = await this.repairAgent.repairReview(task, review, baseContext);
+        this.metrics.recordRepair(reviewRepairSucceeded);
+        if (reviewRepairSucceeded) {
+          review = await this.reviewerAgent.review(task, baseContext, Array.from(new Set(allChangedFiles)));
+          this.journal.record('review-after-repair', review);
+        }
+      }
+
+      if (finalValidation.success && review.passed) {
         this.checkpoints.create('validation-passed', {
           completedTasks: this.taskManager.state.steps.filter(s => s.status === 'completed').map(s => s.description),
-          validationStatus: { success: true }
+          validationStatus: { success: true },
+          reviewStatus: review
         });
-        finalResult += '\nFinal Validation: PASSED\n';
-      } else {
+        finalResult += '\nFinal Validation: PASSED\nReview: PASSED\n';
+      } else if (!finalValidation.success) {
         finalResult += `\nFinal Validation: FAILED (${finalValidation.phase})\n${finalValidation.error}\n`;
+        if (!review.passed) finalResult += `Review: FAILED\n${(review.findings || []).join('\n')}\n`;
+      } else {
+        finalResult += `\nFinal Validation: PASSED\nReview: FAILED\n${(review.findings || []).join('\n')}\n`;
       }
 
       this._createGitCheckpoint(task, 'post-task');
       this.session.rememberTask(task, finalResult.substring(0, 500));
-      this.metrics.recordTask(this.taskManager.state.status === 'completed' && finalValidation.success, Date.now() - startTime);
+      this.metrics.recordTask(this.taskManager.state.status === 'completed' && finalValidation.success && review.passed, Date.now() - startTime);
       return finalResult;
     } finally {
       try { await this.gateway.closeSession(); } catch {}
@@ -137,6 +168,13 @@ class EnhancedOrchestrator {
       'PROJECT CONTEXT:',
       baseContext,
       '',
+      'SEMANTICALLY RELATED FILES:',
+      JSON.stringify(this.semanticSearch.search(`${task} ${step}`, 8).map(r => ({
+        path: r.path,
+        score: Number(r.score.toFixed(3)),
+        symbols: r.symbols.slice(0, 8)
+      })), null, 2),
+      '',
       'OVERALL TASK:',
       task,
       '',
@@ -148,22 +186,25 @@ class EnhancedOrchestrator {
     ].join('\n');
 
     try {
-      const result = await this.gateway.chat(prompt);
+      const result = await this.executorAgent.execute(prompt);
       const changedFiles = this._diffSnapshot(before, this._snapshotWorkspace());
       const durationMs = Date.now() - stepStart;
+      if (changedFiles.length) {
+        await this.analyzer.analyze();
+        this.repositoryMap.updateChangedFiles(changedFiles);
+        this.semanticSearch.refresh();
+      }
 
-      this.executionLog.push({ index: index + 1, step, summary: result.substring(0, 400), durationMs });
+      this.executionLog.push({ index: index + 1, step, summary: result.substring(0, 400), durationMs, changedFiles });
       this.executionLog = this.executionLog.slice(-8);
       this.metrics.recordStep(true);
       this.journal.record('step-complete', { index: index + 1, durationMs, changedFiles, result: result.substring(0, 1000) });
 
       if (changedFiles.length > 0 || this._resultMentionsToolMutation(result)) {
-        const validation = await this.validator.validate();
-        this.metrics.recordValidation(validation);
-        this.journal.record('validation', { index: index + 1, changedFiles, success: validation.success, phase: validation.phase, error: validation.error });
+        const validation = await this.validatorAgent.validate({ source: 'step', index: index + 1, changedFiles });
 
         if (!validation.success) {
-          const repaired = await this._repairLoop(validation, step, baseContext);
+          const repaired = await this.repairAgent.repair(validation, step, baseContext);
           this.metrics.recordRepair(repaired);
           if (!repaired) this.executionLog[this.executionLog.length - 1].validationFailed = true;
         } else {
@@ -188,65 +229,15 @@ class EnhancedOrchestrator {
     }
   }
 
-  async _repairLoop(validation, step, baseContext, maxRetries = 3) {
-    let currentValidation = validation;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const fingerprint = ErrorFingerprint.hash(currentValidation.error || currentValidation.output || '');
-      const attempts = (this.repairFingerprints.get(fingerprint) || 0) + 1;
-      this.repairFingerprints.set(fingerprint, attempts);
-
-      this.journal.record('repair-attempt', {
-        fingerprint,
-        attempts,
-        phase: currentValidation.phase,
-        error: currentValidation.error
-      });
-
-      if (attempts > 1) {
-        logger.warn(`Stopping repair: identical failure repeated (${fingerprint})`);
-        return false;
-      }
-
-      logger.info(`Repair attempt ${attempt}/${maxRetries} for ${currentValidation.phase} failure...`);
-      const repairPrompt = [
-        'A validation check failed after a step.',
-        '',
-        'PHASE FAILED: ' + currentValidation.phase,
-        'ERROR OUTPUT:',
-        currentValidation.error,
-        '',
-        'LAST STEP EXECUTED:',
-        step,
-        '',
-        'PROJECT CONTEXT:',
-        baseContext,
-        '',
-        'Diagnose and fix the error using tools. Output ONLY a repair summary.'
-      ].join('\n');
-
-      try {
-        await this.gateway.chat(repairPrompt);
-        currentValidation = await this.validator.validate();
-        this.metrics.recordValidation(currentValidation);
-        if (currentValidation.success) {
-          this.journal.record('repair-success', { fingerprint });
-          this.checkpoints.create('repair-success', { validationStatus: { success: true } });
-          return true;
-        }
-      } catch (err) {
-        this.journal.record('repair-error', { fingerprint, error: err.message });
-      }
-    }
-
-    return false;
-  }
-
   _baseContext() {
     return JSON.stringify({
       project: this.analyzer.getSummary(),
       dependencyGraph: this.analyzer.getDependencyGraph().toJSON(),
-      recentTasks: this.session.getRecentTasks()
+      recentTasks: this.session.getRecentTasks(),
+      repositoryMap: {
+        updatedAt: this.repositoryMap?.map?.updatedAt,
+        files: Object.keys(this.repositoryMap?.map?.files || {}).length
+      }
     }, null, 2);
   }
 
@@ -318,7 +309,9 @@ class EnhancedOrchestrator {
       packageJsonFound: fs.existsSync(pkg),
       buildCommandDetected: Boolean(this.validator.buildCommand),
       testCommandDetected: Boolean(this.validator.testCommand),
-      planSteps: plan.steps?.length || 0
+      planSteps: plan.steps?.length || 0,
+      semanticIndexFiles: Object.keys(this.repositoryMap?.map?.files || {}).length,
+      relatedFilesFound: plan.relatedFiles?.length || 0
     };
   }
 

@@ -12,6 +12,7 @@
     "release:major": "node scripts/publish.js major",
     "release": "node scripts/publish.js",
     "analyze": "node src/analyze.js",
+    "semantic-search": "node src/semantic-search.js",
     "start": "node src/index.js",
     "prepublishOnly": "node src/analyze.js . && echo '✅ Pre-publish checks passed'"
   },
