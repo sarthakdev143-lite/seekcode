@@ -1,0 +1,1 @@
+{"scripts":{"test":"node validate.js"},"dependencies":{"express":"^4.18.2","supertest":"^6.3.4"},"devDependencies":{}}

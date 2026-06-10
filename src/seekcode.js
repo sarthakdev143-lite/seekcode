@@ -8,6 +8,7 @@ const logger = require('./logger');
 const { analyzeCommand } = require('./commands/analyze');
 const { planCommand } = require('./commands/plan');
 const { runCommand } = require('./commands/run');
+const { benchmarkCommand } = require('./commands/benchmark');
 const { ProjectAnalyzer } = require('./analyzer/ProjectAnalyzer');
 
 // ---------- Gateway Manager ----------
@@ -112,6 +113,16 @@ program
       // Keep gateway running for subsequent commands, or stop? 
       // For single command, we'll leave it running; user can Ctrl+C.
     }
+  });
+
+program
+  .command('benchmark <action> [project]')
+  .description('Run SeekCode capability benchmarks')
+  .option('--agent', 'Execute SeekCode against each benchmark before validation')
+  .option('--timeout-ms <ms>', 'Per-command timeout')
+  .action(async (action, project, options) => {
+    if (action !== 'run') { console.error('Only "benchmark run" is supported'); process.exit(1); }
+    await benchmarkCommand(project || process.cwd(), options);
   });
 
 // Default: interactive mode if no arguments

@@ -30,7 +30,12 @@ class ReviewerAgent {
     const response = await this.gateway.chat(prompt);
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return { passed: false, findings: ['Reviewer returned invalid JSON'] };
-    return JSON.parse(jsonMatch[0]);
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return { passed: Boolean(parsed.passed), findings: Array.isArray(parsed.findings) ? parsed.findings : [] };
+    } catch (err) {
+      return { passed: false, findings: ['Reviewer returned malformed JSON: ' + err.message] };
+    }
   }
 }
 

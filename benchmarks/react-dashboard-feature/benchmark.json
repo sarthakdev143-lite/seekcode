@@ -1,0 +1,7 @@
+{
+  "id": "react-dashboard-feature",
+  "task": "Create a React dashboard feature that renders revenue, active users, and conversion metrics.",
+  "successCriteria": ["Dashboard component exists", "Three metrics render", "Build/test validation passes"],
+  "validationCommands": { "build": "node -c validate.js", "test": "node validate.js" },
+  "expectedOutputs": [{ "file": "src/Dashboard.jsx", "contains": "conversion" }]
+}

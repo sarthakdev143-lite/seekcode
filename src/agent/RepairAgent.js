@@ -10,6 +10,7 @@ class RepairAgent {
     this.journal = options.journal || null;
     this.checkpoints = options.checkpoints || null;
     this.fingerprints = new Map();
+    this.errorMemory = options.errorMemory || null;
     this.maxRetries = options.maxRetries || 3;
   }
 
@@ -18,9 +19,21 @@ class RepairAgent {
 
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       const fingerprint = ErrorFingerprint.hash(currentValidation.error || currentValidation.output || '');
+      this.errorMemory?.record(currentValidation);
       const attempts = (this.fingerprints.get(fingerprint) || 0) + 1;
       this.fingerprints.set(fingerprint, attempts);
       this.journal?.record('repair-attempt', { fingerprint, attempts, phase: currentValidation.phase, error: currentValidation.error });
+
+      const knownFix = await this.errorMemory?.applyKnownFix(currentValidation);
+      if (knownFix?.applied) {
+        currentValidation = await this.validatorAgent.validate({ source: 'error-memory', fingerprint });
+        if (currentValidation.success) {
+          this.errorMemory.record({ error: fingerprint, phase: 'known-fix' }, true, knownFix);
+          this.journal?.record('repair-success', { fingerprint, knownFix });
+          this.checkpoints?.create('repair-success', { validationStatus: { success: true }, knownFix });
+          return true;
+        }
+      }
 
       if (attempts > 1) {
         logger.warn(`Stopping repair: identical failure repeated (${fingerprint})`);

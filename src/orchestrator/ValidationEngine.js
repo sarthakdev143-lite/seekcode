@@ -47,6 +47,7 @@ class ValidationEngine {
   runCommand(command, options = {}) {
     const timeoutMs = options.timeoutMs || this.timeoutMs;
     const controller = options.controller;
+    const quiet = Boolean(options.quiet);
 
     return new Promise((resolve) => {
       const child = spawn(command, {
@@ -77,13 +78,13 @@ class ValidationEngine {
       child.stdout.on('data', chunk => {
         const text = chunk.toString();
         stdout += text;
-        process.stdout.write(text);
+        if (!quiet) process.stdout.write(text);
       });
 
       child.stderr.on('data', chunk => {
         const text = chunk.toString();
         stderr += text;
-        process.stderr.write(text);
+        if (!quiet) process.stderr.write(text);
       });
 
       child.on('error', err => {

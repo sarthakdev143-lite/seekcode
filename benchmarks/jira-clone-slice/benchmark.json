@@ -1,0 +1,7 @@
+{
+  "id": "jira-clone-slice",
+  "task": "Implement a Jira clone slice with issue creation, status transitions, and board grouping.",
+  "successCriteria": ["Issues can be created", "Status transition works", "Board groups by todo/in-progress/done"],
+  "validationCommands": { "build": "node -c src/issues.js", "test": "node validate.js" },
+  "expectedOutputs": [{ "file": "src/issues.js", "contains": "getBoard" }]
+}

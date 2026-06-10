@@ -1,0 +1,7 @@
+{
+  "id": "bug-fix-challenge",
+  "task": "Fix the average function so it handles empty arrays and computes correct numeric averages.",
+  "successCriteria": ["Correct arithmetic", "Empty array returns 0", "Validation passes"],
+  "validationCommands": { "build": "node -c math.js", "test": "node validate.js" },
+  "expectedOutputs": [{ "file": "math.js", "contains": "return 0" }]
+}

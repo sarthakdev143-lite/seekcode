@@ -1,0 +1,7 @@
+{
+  "id": "refactor-challenge",
+  "task": "Refactor user formatting into a reusable formatUser function without changing behavior.",
+  "successCriteria": ["formatUser is exported", "Duplicate formatting removed", "Behavior unchanged"],
+  "validationCommands": { "build": "node -c users.js", "test": "node validate.js" },
+  "expectedOutputs": [{ "file": "users.js", "contains": "formatUser" }]
+}

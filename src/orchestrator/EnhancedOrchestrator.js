@@ -24,6 +24,7 @@ const { ValidatorAgent } = require('../agent/ValidatorAgent');
 const { RepairAgent } = require('../agent/RepairAgent');
 const { ReviewerAgent } = require('../agent/ReviewerAgent');
 const logger = require('../logger');
+const { ErrorMemory } = require('../recovery/ErrorMemory');
 
 let TraceLogger = null;
 try { TraceLogger = require('../trace-logger').TraceLogger; } catch {}
@@ -53,6 +54,7 @@ class EnhancedOrchestrator {
     this.testRunner = new TestRunner(this.projectPath);
     this.gitManager = new GitManager(this.projectPath);
     this.validator = new ValidationEngine(this.projectPath);
+    this.errorMemory = new ErrorMemory(this.projectPath, this.validator);
     this.metrics = new MetricsCollector(this.projectPath);
     this.repositoryMap = new RepositoryMap(this.projectPath, this.analyzer);
     this.repositoryMap.build();
@@ -88,7 +90,7 @@ class EnhancedOrchestrator {
     this.journal = new ExecutionJournal(this.projectPath, this.taskManager.taskId);
     this.checkpoints = new CheckpointManager(this.projectPath, this.taskManager.taskId);
     this.validatorAgent = new ValidatorAgent(this.validator, this.metrics, this.journal);
-    this.repairAgent = new RepairAgent(this.gateway, this.validatorAgent, { journal: this.journal, checkpoints: this.checkpoints });
+    this.repairAgent = new RepairAgent(this.gateway, this.validatorAgent, { journal: this.journal, checkpoints: this.checkpoints, errorMemory: this.errorMemory });
     this.reviewerAgent = new ReviewerAgent(this.gateway, this.semanticSearch);
     this.journal.record('task-start', { task, plan: plan.steps });
     this.journal.record('confidence-evidence', this._confidenceEvidence(plan));
@@ -146,6 +148,9 @@ class EnhancedOrchestrator {
       this.session.rememberTask(task, finalResult.substring(0, 500));
       this.metrics.recordTask(this.taskManager.state.status === 'completed' && finalValidation.success && review.passed, Date.now() - startTime);
       return finalResult;
+    } catch (err) {
+      this.metrics?.recordTask(false, Date.now() - startTime);
+      throw err;
     } finally {
       try { await this.gateway.closeSession(); } catch {}
       if (this.traceLogger) this.traceLogger.close();
@@ -206,7 +211,14 @@ class EnhancedOrchestrator {
         if (!validation.success) {
           const repaired = await this.repairAgent.repair(validation, step, baseContext);
           this.metrics.recordRepair(repaired);
-          if (!repaired) this.executionLog[this.executionLog.length - 1].validationFailed = true;
+          if (!repaired) {
+            this.executionLog[this.executionLog.length - 1].validationFailed = true;
+            this.taskManager.failStep(index, validation.error || 'Validation failed');
+            throw new Error(`Validation failed after step ${index + 1}: ${validation.error || validation.phase}`);
+          }
+          await this.analyzer.analyze();
+          this.repositoryMap.updateChangedFiles(changedFiles);
+          this.semanticSearch.refresh();
         } else {
           this.checkpoints.create('milestone-complete', {
             filesChanged: changedFiles,
@@ -225,7 +237,7 @@ class EnhancedOrchestrator {
       this.taskManager.failStep(index, err.message);
       this.journal.record('step-failed', { index: index + 1, durationMs, error: err.message });
       if (this.traceLogger) this.traceLogger.logStep(stepId, step, 'error', durationMs, { error: err.message });
-      return `Step ${index + 1}: ${step}\nERROR: ${err.message}\n\n`;
+      throw err;
     }
   }
 

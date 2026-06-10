@@ -2,6 +2,7 @@ const { program } = require('commander');
 const { analyzeCommand } = require('./commands/analyze');
 const { planCommand } = require('./commands/plan');
 const { runCommand } = require('./commands/run');
+const { benchmarkCommand } = require('./commands/benchmark');
 
 program
   .name('seekcode')
@@ -29,6 +30,16 @@ program
   .action(async (project, task) => {
     if (!task) { console.error('Error: task argument required'); process.exit(1); }
     await runCommand(project, task);
+  });
+
+program
+  .command('benchmark <action> [project]')
+  .description('Run SeekCode capability benchmarks')
+  .option('--agent', 'Execute SeekCode against each benchmark before validation')
+  .option('--timeout-ms <ms>', 'Per-command timeout')
+  .action(async (action, project, options) => {
+    if (action !== 'run') { console.error('Only "benchmark run" is supported'); process.exit(1); }
+    await benchmarkCommand(project || process.cwd(), options);
   });
 
 program.parse();
