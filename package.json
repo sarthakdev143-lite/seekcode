@@ -17,11 +17,16 @@
     "prepublishOnly": "node src/analyze.js . && echo '✅ Pre-publish checks passed'"
   },
   "dependencies": {
-    "deepseek-web-gateway": "^1.0.0",
+    "chalk": "^4.1.2",
     "commander": "^15.0.0",
+    "deepseek-web-gateway": "^1.0.0",
+    "enquirer": "^2.4.1",
     "fast-glob": "^3.3.2",
     "ignore": "^5.3.1",
+    "marked": "^15.0.12",
+    "marked-terminal": "^7.3.0",
     "node-fetch": "^2.7.0",
+    "ora": "^5.4.1",
     "tree-sitter": "^0.21.1",
     "tree-sitter-javascript": "^0.21.1",
     "tree-sitter-typescript": "^0.21.1"

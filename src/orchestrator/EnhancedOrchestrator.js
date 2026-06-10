@@ -299,7 +299,7 @@ class EnhancedOrchestrator {
   _updateTopic(title, intent) {
     this.currentTopic = { title, intent, timestamp: new Date().toISOString() };
     if (this.traceLogger) this.traceLogger.logEvent('topic_update', this.currentTopic);
-    logger.header(`TOPIC: ${title} | ${intent}`);
+    logger.topic(title, intent);
   }
 
   async _generateProposal(task, plan) {

@@ -1,4 +1,4 @@
-﻿const path = require('path');
+const path = require('path');
 const logger = require('../logger');
 const { EnhancedOrchestrator } = require('../orchestrator/EnhancedOrchestrator');
 
@@ -8,6 +8,9 @@ async function runCommand(projectPath, task) {
   const orchestrator = new EnhancedOrchestrator(absPath);
   await orchestrator.init();
   const result = await orchestrator.run(task);
-  console.log(result);
+  
+  logger.divider();
+  console.log(logger.renderMarkdown(result));
+  logger.divider();
 }
 module.exports = { runCommand };

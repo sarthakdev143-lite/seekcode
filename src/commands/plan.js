@@ -25,6 +25,19 @@ async function planCommand(projectPath, task) {
     traceLogger.close();
   }
 
-  console.log(JSON.stringify(plan, null, 2));
+  // Render plan as Markdown
+  let md = `## Execution Plan for: ${task}\n\n`;
+  if (plan.quickAnswer) {
+    md += `**Type:** Quick Answer (No changes needed)\n`;
+  } else {
+    md += `### Steps:\n`;
+    plan.steps.forEach((step, i) => {
+      md += `${i + 1}. ${step}\n`;
+    });
+  }
+  
+  logger.divider();
+  console.log(logger.renderMarkdown(md));
+  logger.divider();
 }
 module.exports = { planCommand };
