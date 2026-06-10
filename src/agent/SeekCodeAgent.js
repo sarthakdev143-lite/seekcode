@@ -65,7 +65,7 @@ class SeekCodeAgent {
     const intent = classify(input, this.analyzer.getSummary());
     this._currentIntent = intent;
 
-    // ENHANCEMENT: System-level constraints for Agentic behavior
+    // CORE DIRECTIVES:
     const agenticBase = [
       'You are SeekCode, a senior autonomous software engineer.',
       'CORE DIRECTIVES:',
@@ -73,7 +73,8 @@ class SeekCodeAgent {
       '- SURGICAL EDITS: Prefer `replace_in_file` over `write_file`. Be precise.',
       '- VALIDATE ALWAYS: After any change, run a relevant command (test, build, or ls) to verify.',
       '- NO HACKS: Do not suppress warnings or use `any` types. Fix the root cause.',
-      '- IDIOMATIC: Match the existing project style, naming, and architecture.'
+      '- IDIOMATIC: Match the existing project style, naming, and architecture.',
+      '- DELEGATION: If a task involves a long investigation or multiple files, you can describe a "sub-task" to be handled by a specialized investigator.'
     ].join('\n');
 
     switch (intent) {

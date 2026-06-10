@@ -65,26 +65,41 @@ class EnhancedOrchestrator {
     logger.success('Enhanced orchestrator initialized');
   }
 
-  async run(task) {
+  async run(task, options = {}) {
     this.executionLog = [];
     const explicitTaskId = process.env.SEEKCODE_TASK_ID || null;
     const pendingTaskId = TaskManager.findPendingTask(this.projectPath, explicitTaskId);
     const baseContext = this._baseContext();
     let plan;
 
-    if (this.traceLogger) this.traceLogger.logEvent('run_start', { task });
+    if (this.traceLogger) this.traceLogger.logEvent('run_start', { task, options });
     this._createGitCheckpoint(task, 'pre-task');
 
+    // FEATURE 2: Strategic Intent (Topic Model)
+    this._updateTopic('Initializing', `Starting task: ${task}`);
+
     if (pendingTaskId) {
+      this._updateTopic('Resuming', `Continuing previously interrupted task: ${pendingTaskId}`);
       logger.info(`Resuming task: ${pendingTaskId}`);
       this.taskManager = new TaskManager(this.projectPath, pendingTaskId);
       plan = { steps: this.taskManager.state.steps.map(s => s.description) };
     } else {
+      this._updateTopic('Planning', 'Generating strategic execution plan and semantic mapping');
       plan = await this.plannerAgent.plan(task);
       if (plan.quickAnswer) return this._quickAnswer();
 
       this.taskManager = new TaskManager(this.projectPath);
       this.taskManager.setPlan(plan.steps);
+    }
+
+    // FEATURE 5: Plan Mode (Speculative Design)
+    if (options.planOnly || options.speculate) {
+      this._updateTopic('Speculating', 'Drafting architectural proposal before execution');
+      const proposal = await this._generateProposal(task, plan);
+      const proposalPath = path.join(this.projectPath, 'PROPOSAL.md');
+      fs.writeFileSync(proposalPath, proposal);
+      logger.success(`Proposal written to ${proposalPath}`);
+      return proposal;
     }
 
     this.journal = new ExecutionJournal(this.projectPath, this.taskManager.taskId);
@@ -108,6 +123,7 @@ class EnhancedOrchestrator {
 
     try {
       for (let i = this.taskManager.state.currentStepIndex; i < plan.steps.length; i++) {
+        this._updateTopic(`Step ${i+1}/${plan.steps.length}`, plan.steps[i]);
         const stepResult = await this._executeStep(i, plan.steps[i], plan.steps.length, task, baseContext);
         finalResult += stepResult;
       }
@@ -278,6 +294,37 @@ class EnhancedOrchestrator {
       ...this.executionLog.slice(-4).map(e => `  Step ${e.index}: ${e.step}\n  Result: ${e.summary}`),
       ''
     ].join('\n');
+  }
+
+  _updateTopic(title, intent) {
+    this.currentTopic = { title, intent, timestamp: new Date().toISOString() };
+    if (this.traceLogger) this.traceLogger.logEvent('topic_update', this.currentTopic);
+    logger.header(`TOPIC: ${title} | ${intent}`);
+  }
+
+  async _generateProposal(task, plan) {
+    const prompt = [
+      'You are SeekCode in SPECULATION MODE.',
+      'Draft a detailed PROPOSAL.md for the following task.',
+      '',
+      'TASK:',
+      task,
+      '',
+      'PLAN:',
+      plan.steps.join('\n'),
+      '',
+      'Your proposal should include:',
+      '1. Impact Analysis: Which files will be changed?',
+      '2. Implementation Detail: How will each step be implemented? (provide pseudo-code)',
+      '3. Risks: What could go wrong?',
+      '4. Verification: How will we know it works?',
+      '',
+      'Output ONLY the markdown content for PROPOSAL.md.'
+    ].join('\n');
+    await this.gateway.createSession();
+    const proposal = await this.gateway.chat(prompt);
+    await this.gateway.closeSession();
+    return proposal;
   }
 
   _snapshotWorkspace() {
