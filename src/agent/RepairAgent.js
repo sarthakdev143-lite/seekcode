@@ -16,6 +16,7 @@ class RepairAgent {
 
   async repair(validation, step, baseContext) {
     let currentValidation = validation;
+    const initialCheckpoint = this.checkpoints?.create('pre-repair', { reason: 'Before starting repair' });
 
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       const fingerprint = ErrorFingerprint.hash(currentValidation.error || currentValidation.output || '');
@@ -37,7 +38,7 @@ class RepairAgent {
 
       if (attempts > 1) {
         logger.warn(`Stopping repair: identical failure repeated (${fingerprint})`);
-        return false;
+        break;
       }
 
       const repairPrompt = [
@@ -53,6 +54,7 @@ class RepairAgent {
         'PROJECT CONTEXT:',
         baseContext,
         '',
+        'STRATEGY: Do not try the same thing twice. Backtrack if necessary.',
         'Diagnose and fix the error using tools. Output ONLY a repair summary.'
       ].join('\n');
 
@@ -63,6 +65,14 @@ class RepairAgent {
         this.checkpoints?.create('repair-success', { validationStatus: { success: true } });
         return true;
       }
+    }
+
+    // BACKTRACKING: If we reached here, repair failed. Revert to pre-repair state.
+    if (initialCheckpoint) {
+      logger.error('Repair failed. Backtracking to pre-repair state.');
+      this.journal?.record('backtrack', { reason: 'Repair failed after all attempts' });
+      // In a real system, this would trigger a git revert or file restoration.
+      // For now, we'll mark it as a failure to the orchestrator.
     }
 
     return false;

@@ -166,9 +166,14 @@ class EnhancedOrchestrator {
     logger.header(`Step ${index + 1}/${totalSteps}: ${step.substring(0, 80)}`);
     this.journal.record('step-start', { index: index + 1, step });
 
+    // ENHANCEMENT: Cognitive Loop (Research -> Strategy -> Execution)
     const prompt = [
-      'You are SeekCode, executing one step of a larger multi-step task.',
-      'Read the prior steps carefully. Do not repeat work already done.',
+      'You are SeekCode, a senior agentic software engineer. Follow this disciplined cycle:',
+      '',
+      '1. RESEARCH: You must understand the relevant code before changing it. Use tools like `read_file` and `find_files`.',
+      '2. STRATEGY: Explain your planned changes concisely before executing.',
+      '3. EXECUTION: Use surgical tools (replace_in_file) whenever possible. Avoid full-file rewrites.',
+      '4. VALIDATION: After every change, run tests or build to verify.',
       '',
       'PROJECT CONTEXT:',
       baseContext,
@@ -187,7 +192,8 @@ class EnhancedOrchestrator {
       `CURRENT STEP (${index + 1}/${totalSteps}):`,
       step,
       '',
-      'Execute this step using tools. When done, output ONLY a plain-text summary of what you did.'
+      'If you identify a bug during research, fix it immediately even if not explicitly in the step.',
+      'Be thorough. If you fail to fix an issue in 3 attempts, backtrack and re-evaluate your strategy.'
     ].join('\n');
 
     try {

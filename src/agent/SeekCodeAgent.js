@@ -65,24 +65,34 @@ class SeekCodeAgent {
     const intent = classify(input, this.analyzer.getSummary());
     this._currentIntent = intent;
 
+    // ENHANCEMENT: System-level constraints for Agentic behavior
+    const agenticBase = [
+      'You are SeekCode, a senior autonomous software engineer.',
+      'CORE DIRECTIVES:',
+      '- RESEARCH FIRST: Never edit a file without reading it and its dependencies first.',
+      '- SURGICAL EDITS: Prefer `replace_in_file` over `write_file`. Be precise.',
+      '- VALIDATE ALWAYS: After any change, run a relevant command (test, build, or ls) to verify.',
+      '- NO HACKS: Do not suppress warnings or use `any` types. Fix the root cause.',
+      '- IDIOMATIC: Match the existing project style, naming, and architecture.'
+    ].join('\n');
+
     switch (intent) {
       case INTENTS.GREETING:
         return await this._handleGreeting(input);
       case INTENTS.QUESTION:
-        return await this._handleQuestion(input);
+        return await this._handleQuestion(input, agenticBase);
       case INTENTS.SINGLE_EDIT:
-        return await this._handleSingleEdit(input);
+        return await this._handleSingleEdit(input, agenticBase);
       case INTENTS.MULTI_STEP:
-        return await this._handleMultiStep(input);
+        return await this._handleMultiStep(input, agenticBase);
       default:
-        return await this._handleChat(input);  // freeform chat
+        return await this._handleChat(input, agenticBase);
     }
   }
 
   // ---- Handlers ----
 
   async _handleGreeting(input) {
-    // Don't even call the LLM for greetings
     const greetings = [
       "Hey! I'm SeekCode. What would you like to work on?",
       "Hi there! Ready to help with code. What's the task?",
@@ -91,21 +101,14 @@ class SeekCodeAgent {
     return greetings[Math.floor(Math.random() * greetings.length)];
   }
 
-  async _handleQuestion(input) {
-    const context = this._buildContext();
+  async _handleQuestion(input, agenticBase) {
     const prompt = [
-      'You are SeekCode, an expert coding assistant. Answer the user question concisely.',
-      'You have access to the project context. Keep your answer brief and direct.',
-      '',
-      'PROJECT CONTEXT:',
-      JSON.stringify(this.analyzer.getSummary(), null, 2),
-      '',
-      'CONVERSATION HISTORY:',
-      ...this.conversationHistory.slice(-5).map(m => m.role + ': ' + m.content),
+      agenticBase,
       '',
       'USER QUESTION: ' + input,
       '',
-      'Answer in 1-3 short paragraphs. No tool calls unless needed to read a file.'
+      'PROJECT CONTEXT:',
+      JSON.stringify(this.analyzer.getSummary(), null, 2)
     ].join('\n');
 
     const response = await this._callLLMWithTrace(prompt, '_handleQuestion');
@@ -114,21 +117,17 @@ class SeekCodeAgent {
     return response;
   }
 
-  async _handleSingleEdit(input) {
-    const context = this._buildContext();
+  async _handleSingleEdit(input, agenticBase) {
     const prompt = [
-      'You are SeekCode, an expert coding assistant. Perform the requested edit.',
+      agenticBase,
       '',
-      'PROJECT CONTEXT:',
-      JSON.stringify(this.analyzer.getSummary(), null, 2),
+      'TASK: ' + input,
       '',
-      'RECENT CONVERSATION:',
-      ...this.conversationHistory.slice(-3).map(m => m.role + ': ' + m.content),
-      '',
-      'USER REQUEST: ' + input,
-      '',
-      'Use tools (read_file, write_file, replace_in_file, run_command) as needed.',
-      'Do one thing at a time. After completing the edit, provide a brief summary.'
+      'STEPS:',
+      '1. Research: Read the file and understand its purpose.',
+      '2. Plan: Explain what you will change.',
+      '3. Act: Use surgical tools.',
+      '4. Verify: Run a check.'
     ].join('\n');
 
     const response = await this._callLLMWithTrace(prompt, '_handleSingleEdit');
@@ -137,23 +136,19 @@ class SeekCodeAgent {
     return response;
   }
 
-  async _handleMultiStep(input) {
-    // For complex tasks, generate a light plan but let the LLM drive execution
-    const context = this._buildContext();
+  async _handleMultiStep(input, agenticBase) {
     const prompt = [
-      'You are SeekCode, an expert AI software engineer. Complete the following task.',
+      agenticBase,
+      '',
+      'USER TASK: ' + input,
       '',
       'PROJECT CONTEXT:',
       JSON.stringify(this.analyzer.getSummary(), null, 2),
       '',
-      'USER TASK: ' + input,
-      '',
       'Approach:',
-      '1. Briefly state your plan (2-3 bullet points)',
-      '2. Execute using tools (read_file, write_file, run_command, etc.)',
-      '3. After completing, provide a summary of what was done',
-      '',
-      'You have full access to the filesystem. Be thorough but efficient.'
+      '1. Research and state your plan.',
+      '2. Execute using surgical tools.',
+      '3. Validate and summarize.'
     ].join('\n');
 
     const response = await this._callLLMWithTrace(prompt, '_handleMultiStep');
@@ -162,21 +157,14 @@ class SeekCodeAgent {
     return response;
   }
 
-  async _handleChat(input) {
-    // Freeform chat – let the LLM decide what to do
-    const context = this._buildContext();
+  async _handleChat(input, agenticBase) {
     const prompt = [
-      'You are SeekCode, an expert coding assistant. Respond to the user naturally.',
-      'You have access to project tools (read_file, write_file, run_command).',
-      '',
-      'PROJECT: ' + JSON.stringify(this.analyzer.getSummary()),
-      '',
-      'CONVERSATION:',
-      ...this.conversationHistory.slice(-8).map(m => m.role + ': ' + m.content),
+      agenticBase,
       '',
       'USER: ' + input,
       '',
-      'Respond helpfully. If you need to read or edit files, use the tools. If it is a simple conversation, just reply.'
+      'CONVERSATION:',
+      ...this.conversationHistory.slice(-8).map(m => m.role + ': ' + m.content)
     ].join('\n');
 
     const response = await this._callLLMWithTrace(prompt, '_handleChat');
