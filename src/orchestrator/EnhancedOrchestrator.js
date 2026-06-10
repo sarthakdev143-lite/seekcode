@@ -39,8 +39,8 @@ class EnhancedOrchestrator {
 
     if (process.env.SEEKCODE_TRACE === '1' && TraceLogger) {
       const sessionId = `orchestrator_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-      this.traceLogger = new TraceLogger(sessionId);
-      this.traceLogger.logEvent('orchestrator_init', { projectPath });
+      this.traceLogger = new TraceLogger(sessionId, this.projectPath);
+      this.traceLogger.logEvent('orchestrator_init', { projectPath: this.projectPath });
     }
   }
 
@@ -89,7 +89,7 @@ class EnhancedOrchestrator {
 
     this.journal = new ExecutionJournal(this.projectPath, this.taskManager.taskId);
     this.checkpoints = new CheckpointManager(this.projectPath, this.taskManager.taskId);
-    this.validatorAgent = new ValidatorAgent(this.validator, this.metrics, this.journal);
+    this.validatorAgent = new ValidatorAgent(this.validator, this.metrics, this.journal, this.traceLogger);
     this.repairAgent = new RepairAgent(this.gateway, this.validatorAgent, { journal: this.journal, checkpoints: this.checkpoints, errorMemory: this.errorMemory });
     this.reviewerAgent = new ReviewerAgent(this.gateway, this.semanticSearch);
     this.journal.record('task-start', { task, plan: plan.steps });

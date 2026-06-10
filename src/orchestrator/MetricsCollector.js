@@ -5,12 +5,13 @@ const { atomicWriteJson } = require('../utils/atomicWrite');
 class MetricsCollector {
   constructor(projectDir) {
     this.projectDir = projectDir;
-    this.metricsFile = path.join(this.projectDir, '.seekcode', 'metrics.json');
+    this.metricsDir = path.join(this.projectDir, '.seekcode', 'metrics');
+    this.metricsFile = path.join(this.metricsDir, 'project.json');
     this.metrics = this._load();
   }
 
-  _load() {
-    const defaults = {
+  _getDefaults() {
+    return {
       tasksCompleted: 0,
       tasksFailed: 0,
       totalSteps: 0,
@@ -24,18 +25,16 @@ class MetricsCollector {
       repairSuccess: 0,
       totalDurationMs: 0
     };
+  }
+
+  _load() {
+    const defaults = this._getDefaults();
     if (fs.existsSync(this.metricsFile)) {
       try {
         const loaded = JSON.parse(fs.readFileSync(this.metricsFile, 'utf8'));
         return {
           ...defaults,
-          ...loaded,
-          buildRuns: loaded.buildRuns ?? loaded.buildsRun ?? defaults.buildRuns,
-          buildFailures: loaded.buildFailures ?? ((loaded.buildsRun || 0) - (loaded.buildsSucceeded || 0)),
-          testRuns: loaded.testRuns ?? loaded.testsRun ?? defaults.testRuns,
-          testFailures: loaded.testFailures ?? ((loaded.testsRun || 0) - (loaded.testsPassed || 0)),
-          repairAttempts: loaded.repairAttempts ?? loaded.repairsAttempted ?? defaults.repairAttempts,
-          repairSuccess: loaded.repairSuccess ?? loaded.repairsSucceeded ?? defaults.repairSuccess
+          ...loaded
         };
       } catch (err) {}
     }
@@ -43,9 +42,49 @@ class MetricsCollector {
   }
 
   save() {
-    const dir = path.dirname(this.metricsFile);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(this.metricsDir)) fs.mkdirSync(this.metricsDir, { recursive: true });
     atomicWriteJson(this.metricsFile, this.metrics);
+    
+    // Also save to global metrics
+    try {
+      const os = require('os');
+      const globalMetricsDir = path.join(os.homedir(), '.seekcode', 'metrics');
+      if (!fs.existsSync(globalMetricsDir)) fs.mkdirSync(globalMetricsDir, { recursive: true });
+      const globalMetricsFile = path.join(globalMetricsDir, 'global.json');
+      
+      let globalMetrics = this._getDefaults();
+      if (fs.existsSync(globalMetricsFile)) {
+        try {
+          globalMetrics = JSON.parse(fs.readFileSync(globalMetricsFile, 'utf8'));
+        } catch {}
+      }
+      
+      // Update global metrics (increment based on current project metrics)
+      // Note: This is a simple approximation. In a real system we'd track session-specific deltas.
+      // For now, we'll just write project metrics to global as well (or merge them if we knew the delta).
+      // Let's just store the project metrics in a project-specific file in the global dir.
+      const projectHash = require('crypto').createHash('md5').update(this.projectDir).digest('hex');
+      const globalProjectFile = path.join(globalMetricsDir, `project-${projectHash}.json`);
+      atomicWriteJson(globalProjectFile, {
+        projectPath: this.projectDir,
+        ...this.metrics
+      });
+
+      // Aggregated global metrics
+      const files = fs.readdirSync(globalMetricsDir).filter(f => f.startsWith('project-') && f.endsWith('.json'));
+      const aggregated = this._getDefaults();
+      for (const file of files) {
+        try {
+          const data = JSON.parse(fs.readFileSync(path.join(globalMetricsDir, file), 'utf8'));
+          for (const key in aggregated) {
+            if (typeof data[key] === 'number') aggregated[key] += data[key];
+          }
+        } catch {}
+      }
+      atomicWriteJson(globalMetricsFile, aggregated);
+    } catch (err) {
+      // Ignore global metrics errors
+    }
   }
 
   recordTask(success, durationMs) {

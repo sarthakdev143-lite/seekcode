@@ -11,6 +11,28 @@ const { runCommand } = require('./commands/run');
 const { benchmarkCommand } = require('./commands/benchmark');
 const { ProjectAnalyzer } = require('./analyzer/ProjectAnalyzer');
 
+const { TraceLogger } = require('./trace-logger');
+
+// ---------- Crash Handling ----------
+function setupCrashHandler() {
+  const handler = (error, type) => {
+    const crashFile = TraceLogger.logCrash(error, { type });
+    logger.error(`\nCRASH DETECTED: ${error.message}`);
+    if (crashFile) {
+      logger.info(`Crash report saved to: ${crashFile}`);
+    }
+    process.exit(1);
+  };
+
+  process.on('uncaughtException', (err) => handler(err, 'uncaughtException'));
+  process.on('unhandledRejection', (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    handler(err, 'unhandledRejection');
+  });
+}
+
+setupCrashHandler();
+
 // ---------- Gateway Manager ----------
 const GATEWAY_PORT = 8080;
 const GATEWAY_PATH = require.resolve('deepseek-web-gateway/src/server.js');
@@ -36,7 +58,6 @@ async function waitForGateway() {
 
 async function startGatewayIfNeeded() {
   if (await healthCheck()) {
-    logger.info('Gateway already running.');
     return true;
   }
 
@@ -75,7 +96,17 @@ function stopGateway() {
 program
   .name('seekcode')
   .description('AI Coding Orchestrator powered by DeepSeek')
-  .version('0.1.0');
+  .version('0.1.0')
+  .option('--no-trace', 'Disable detailed tracing');
+
+program.hook('preAction', (thisCommand, actionCommand) => {
+  const globalOptions = program.opts();
+  if (globalOptions.trace !== false) {
+    process.env.SEEKCODE_TRACE = '1';
+  } else {
+    delete process.env.SEEKCODE_TRACE;
+  }
+});
 
 program
   .command('analyze [project]')
@@ -95,15 +126,9 @@ program
 program
   .command('run [project] [task]')
   .description('Execute a task (auto-starts gateway)')
-  .option('--trace', 'Enable detailed tracing (logs to .seekcode/traces/)')
+  .option('--trace', 'Enable detailed tracing (ON by default)')
   .action(async (project, task, options) => {
     if (!task) { console.error('Task required'); process.exit(1); }
-    
-    // Set trace environment variable if --trace flag is provided
-    if (options.trace) {
-      process.env.SEEKCODE_TRACE = '1';
-      logger.info('🔍 Tracing enabled - logs will be written to .seekcode/traces/');
-    }
     
     const gatewayReady = await startGatewayIfNeeded();
     if (!gatewayReady) process.exit(1);
@@ -111,7 +136,6 @@ program
       await runCommand(project, task);
     } finally {
       // Keep gateway running for subsequent commands, or stop? 
-      // For single command, we'll leave it running; user can Ctrl+C.
     }
   });
 
@@ -125,9 +149,22 @@ program
     await benchmarkCommand(project || process.cwd(), options);
   });
 
-// Default: interactive mode if no arguments
-if (process.argv.length === 2) {
+// If no subcommand is provided, enter interactive mode
+const args = process.argv.slice(2);
+const isCommand = args.length > 0 && !args[0].startsWith('-');
+
+if (!isCommand) {
   (async () => {
+    // Manually parse options to avoid commander showing help for "missing command"
+    program.parseOptions(args);
+    const globalOptions = program.opts();
+    
+    if (globalOptions.trace !== false) {
+      process.env.SEEKCODE_TRACE = '1';
+    } else {
+      delete process.env.SEEKCODE_TRACE;
+    }
+
     const gatewayReady = await startGatewayIfNeeded();
     if (!gatewayReady) process.exit(1);
     await require('./interactive').interactiveMode(process.cwd()).finally(() => {

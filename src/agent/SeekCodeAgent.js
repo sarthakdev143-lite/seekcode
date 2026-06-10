@@ -19,8 +19,8 @@ class SeekCodeAgent {
     // Initialize trace logger if SEEKCODE_TRACE is enabled
     if (process.env.SEEKCODE_TRACE === '1' && TraceLogger) {
       const sessionId = `agent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      this.traceLogger = new TraceLogger(sessionId);
-      this.traceLogger.logEvent('agent_init', { projectPath });
+      this.traceLogger = new TraceLogger(sessionId, this.projectPath);
+      this.traceLogger.logEvent('agent_init', { projectPath: this.projectPath });
     }
   }
 
