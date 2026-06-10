@@ -77,10 +77,15 @@ class TaskPlanner {
     }, null, 2);
 
     const prompt = [
-      'You are a task planner for a coding assistant. Given the project context and user task,',
-      'generate a list of atomic steps (as a JSON array of strings) to accomplish the task.',
-      'Each step should be something a code agent can do.',
-      'Output ONLY a JSON object: {"steps": ["step1", "step2", ...]}. No other text.',
+      'You are a senior technical architect and task planner for an AI coding agent.',
+      'Given the project context and user task, generate a detailed execution plan.',
+      '',
+      'STRATEGY: Use an Incremental Development Strategy.',
+      '- Split complex tasks into logical milestones (e.g., Setup, Database, Logic, Integration, Testing).',
+      '- Each milestone should have atomic steps.',
+      '- Include validation steps (run tests, build) after each major milestone.',
+      '',
+      'Output ONLY a JSON object: {"steps": ["step1", "step2", ...]}.',
       '',
       'PROJECT CONTEXT:',
       context,
