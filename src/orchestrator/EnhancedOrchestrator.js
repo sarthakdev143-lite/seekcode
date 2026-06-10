@@ -1,383 +1,216 @@
-// src/orchestrator/EnhancedOrchestrator.js
 'use strict';
 
-// NOTE: process.on('unhandledRejection') handlers intentionally removed from here.
-// They belong only in the process entry point (seekcode.js / index.js).
-// Having them in every required module causes duplicate handlers and MaxListeners warnings.
-
 const path = require('path');
-const fs   = require('fs');
+const fs = require('fs');
+const crypto = require('crypto');
 
 const { ProjectAnalyzer } = require('../analyzer/ProjectAnalyzer');
-const { TaskPlanner }     = require('../planner/TaskPlanner');
-const { GatewayClient }   = require('../gateway-client');
-const { RefactorEngine }  = require('../smart-tools');
-const { TestRunner }      = require('../testing');
-const { GitManager }     = require('../git');
-const { SessionMemory }   = require('../session');
+const { TaskPlanner } = require('../planner/TaskPlanner');
+const { GatewayClient } = require('../gateway-client');
+const { RefactorEngine } = require('../smart-tools');
+const { TestRunner } = require('../testing');
+const { GitManager } = require('../git');
+const { SessionMemory } = require('../session');
 const { ValidationEngine } = require('./ValidationEngine');
-const { TaskManager }      = require('./TaskManager');
+const { TaskManager } = require('./TaskManager');
 const { MetricsCollector } = require('./MetricsCollector');
-const logger              = require('../logger');
+const { ExecutionJournal } = require('./ExecutionJournal');
+const { CheckpointManager } = require('./CheckpointManager');
+const { ErrorFingerprint } = require('../recovery/ErrorFingerprint');
+const logger = require('../logger');
 
 let TraceLogger = null;
 try { TraceLogger = require('../trace-logger').TraceLogger; } catch {}
 
 class EnhancedOrchestrator {
   constructor(projectPath) {
-    this.projectPath    = path.resolve(projectPath);
-    this.analyzer       = null;
-    this.planner        = null;
-    this.gateway        = new GatewayClient();
-    this.session        = new SessionMemory();
-    this.refactorEngine = null;
-    this.testRunner     = null;
-    this.gitManager     = null;
-    this.validator      = null;
-    this.taskManager    = null;
-    this.metrics        = null;
-    this.traceLogger    = null;
-
-    // Rolling execution log — threads context across all steps
+    this.projectPath = path.resolve(projectPath);
+    this.gateway = new GatewayClient();
+    this.session = new SessionMemory();
     this.executionLog = [];
+    this.repairFingerprints = new Map();
+    this.traceLogger = null;
 
     if (process.env.SEEKCODE_TRACE === '1' && TraceLogger) {
-      const sessionId = `orchestrator_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const sessionId = `orchestrator_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
       this.traceLogger = new TraceLogger(sessionId);
       this.traceLogger.logEvent('orchestrator_init', { projectPath });
     }
   }
 
-  // ── Init ───────────────────────────────────────────────────────────────────
   async init() {
-    const cached = this.session.getProjectMap();
-    if (cached) logger.info('Using cached project map from session');
-
     this.analyzer = new ProjectAnalyzer(this.projectPath);
     await this.analyzer.analyze();
     this.session.storeProjectMap(this.analyzer.getSummary());
 
-    this.planner        = new TaskPlanner(this.analyzer, this.gateway);
+    this.planner = new TaskPlanner(this.analyzer, this.gateway);
     this.refactorEngine = new RefactorEngine(this.analyzer);
-    this.testRunner     = new TestRunner(this.projectPath);
-    this.gitManager     = new GitManager(this.projectPath);
-    this.validator      = new ValidationEngine(this.projectPath);
-    this.metrics        = new MetricsCollector(this.projectPath);
+    this.testRunner = new TestRunner(this.projectPath);
+    this.gitManager = new GitManager(this.projectPath);
+    this.validator = new ValidationEngine(this.projectPath);
+    this.metrics = new MetricsCollector(this.projectPath);
 
     logger.success('Enhanced orchestrator initialized');
-
-    if (this.traceLogger) {
-      this.traceLogger.logEvent('init_complete', { projectSummary: this.analyzer.getSummary() });
-    }
   }
 
-
-  // ── Run ────────────────────────────────────────────────────────────────────
   async run(task) {
-    this.executionLog = []; // reset for each new top-level task
+    this.executionLog = [];
+    const explicitTaskId = process.env.SEEKCODE_TASK_ID || null;
+    const pendingTaskId = TaskManager.findPendingTask(this.projectPath, explicitTaskId);
+    const baseContext = this._baseContext();
+    let plan;
 
     if (this.traceLogger) this.traceLogger.logEvent('run_start', { task });
+    this._createGitCheckpoint(task, 'pre-task');
 
-    // ── Pre-task git snapshot ──────────────────────────────────────────────
-    // Creates a restore point before any destructive changes.
-    // Users can always `git diff HEAD~1` to see exactly what SeekCode changed.
-    if (this.gitManager.isRepo()) {
-      try {
-        const status = this.gitManager._run('git status --porcelain');
-        if (status) {
-          this.gitManager.stageAll();
-          this.gitManager.commit(`seekcode: pre-task checkpoint — ${task.substring(0, 60)}`);
-          logger.info('Pre-task git checkpoint created (restore with: git reset --hard HEAD~1)');
-        }
-      } catch (err) {
-        logger.warn(`Pre-task git snapshot failed (non-fatal): ${err.message}`);
-      }
-    }
-
-    // ── Plan ───────────────────────────────────────────────────────────────
-    let plan;
-    const pendingTaskId = TaskManager.findPendingTask(this.projectPath);
-    
     if (pendingTaskId) {
       logger.info(`Resuming task: ${pendingTaskId}`);
       this.taskManager = new TaskManager(this.projectPath, pendingTaskId);
       plan = { steps: this.taskManager.state.steps.map(s => s.description) };
     } else {
-      const planStart = Date.now();
       plan = await this.planner.plan(task);
-      const planMs = Date.now() - planStart;
-
-      if (this.traceLogger) {
-        this.traceLogger.logStep('planning', 'Generate task plan', 'complete', planMs, {
-          stepsCount: plan.steps?.length || 0,
-          hasQuickAnswer: !!plan.quickAnswer,
-        });
-      }
-
-      // ── Quick answer (question, no code changes) ───────────────────────────
-      if (plan.quickAnswer) {
-        const summary = this.analyzer.getSummary();
-        const files = this.analyzer.getDependencyGraph().getAllFiles();
-        const answer = [
-          `Project: ${summary.project}`,
-          `Framework: ${summary.meta.framework || 'none'}`,
-          `Language: ${summary.meta.language}`,
-          `Files: ${files.length} source files`,
-          `Top-level modules: ${files.filter(f => !f.includes('/')).join(', ')}`,
-        ].join('\n');
-
-        try { await this.gateway.closeSession(); } catch {}
-        if (this.traceLogger) {
-          this.traceLogger.logEvent('quick_answer', { answer: answer.substring(0, 200) });
-          this.traceLogger.close();
-        }
-        return answer;
-      }
+      if (plan.quickAnswer) return this._quickAnswer();
 
       this.taskManager = new TaskManager(this.projectPath);
       this.taskManager.setPlan(plan.steps);
-
-      // ── Confidence Gate ────────────────────────────────────────────────
-      const confidence = await this._evaluateConfidence(task, plan, baseContext);
-      logger.info(`Confidence Score: ${confidence}%`);
-      if (confidence < 70) {
-        logger.warn('Confidence score is low. SeekCode will spend more time researching.');
-        // In a real implementation, we might adjust the plan here or ask for more info
-        // For now, we just log it and proceed, as requested by the framework
-      }
     }
 
-    // ── Execute steps ──────────────────────────────────────────────────────
+    this.journal = new ExecutionJournal(this.projectPath, this.taskManager.taskId);
+    this.checkpoints = new CheckpointManager(this.projectPath, this.taskManager.taskId);
+    this.journal.record('task-start', { task, plan: plan.steps });
+    this.journal.record('confidence-evidence', this._confidenceEvidence(plan));
+
     logger.header(pendingTaskId ? 'Resuming Execution Plan' : 'Execution Plan');
     plan.steps.forEach((s, i) => {
-      const stepState = this.taskManager.state.steps[i];
-      const statusIcon = stepState.status === 'completed' ? '✓' : (stepState.status === 'failed' ? '✗' : ' ');
-      console.log(`  ${i + 1}. [${statusIcon}] ${s}`);
+      const status = this.taskManager.state.steps[i]?.status || 'pending';
+      console.log(`  ${i + 1}. [${status}] ${s}`);
     });
 
     await this.gateway.createSession();
     let finalResult = '';
-
-    // Base context — passed to every step
-    const baseContext = JSON.stringify({
-      project: this.analyzer.getSummary(),
-      dependencyGraph: this.analyzer.getDependencyGraph().toJSON(),
-      recentTasks: this.session.getRecentTasks(),
-    }, null, 2);
-
     const startTime = Date.now();
-    for (let i = this.taskManager.state.currentStepIndex; i < plan.steps.length; i++) {
-      const step      = plan.steps[i];
-      const stepStart = Date.now();
-      const stepId    = `step_${i + 1}`;
 
-      this.taskManager.updateStepStatus(i, 'in-progress');
+    try {
+      for (let i = this.taskManager.state.currentStepIndex; i < plan.steps.length; i++) {
+        const stepResult = await this._executeStep(i, plan.steps[i], plan.steps.length, task, baseContext);
+        finalResult += stepResult;
+      }
 
-      if (this.traceLogger) {
-        this.traceLogger.logStep(stepId, step, 'start', null, {
-          stepIndex: i + 1,
-          totalSteps: plan.steps.length,
+      logger.header('Final Validation');
+      const finalValidation = await this.validator.validate();
+      this.metrics.recordValidation(finalValidation);
+      this.journal.record('final-validation', { success: finalValidation.success, phase: finalValidation.phase, error: finalValidation.error });
+
+      if (finalValidation.success) {
+        this.checkpoints.create('validation-passed', {
+          completedTasks: this.taskManager.state.steps.filter(s => s.status === 'completed').map(s => s.description),
+          validationStatus: { success: true }
         });
+        finalResult += '\nFinal Validation: PASSED\n';
+      } else {
+        finalResult += `\nFinal Validation: FAILED (${finalValidation.phase})\n${finalValidation.error}\n`;
       }
 
-      logger.header(`Step ${i + 1}/${plan.steps.length}: ${step.substring(0, 80)}`);
-
-      const priorWork = this.executionLog.length > 0
-        ? [
-            'PRIOR STEPS COMPLETED:',
-            ...this.executionLog.slice(-4).map(
-              e => `  Step ${e.index}: ${e.step}\n  Result: ${e.summary}`
-            ),
-            '',
-          ].join('\n')
-        : '';
-
-      const prompt = [
-        'You are SeekCode, executing one step of a larger multi-step task.',
-        'Read the prior steps carefully — do not repeat work already done.',
-        '',
-        'PROJECT CONTEXT:',
-        baseContext,
-        '',
-        'OVERALL TASK:',
-        task,
-        '',
-        priorWork,
-        `CURRENT STEP (${i + 1}/${plan.steps.length}):`,
-        step,
-        '',
-        'Execute this step using tools. When done, output ONLY a plain-text summary of what you did.',
-      ].join('\n');
-
-      try {
-        const result  = await this.gateway.chat(prompt);
-        const stepMs  = Date.now() - stepStart;
-
-        this.executionLog.push({
-          index: i + 1,
-          step,
-          summary: result.substring(0, 400),
-          durationMs: stepMs,
-        });
-        if (this.executionLog.length > 8) {
-          this.executionLog = this.executionLog.slice(-8);
-        }
-
-        if (this.traceLogger) {
-          this.traceLogger.logStep(stepId, step, 'complete', stepMs, {
-            resultLength: result.length,
-            stepIndex: i + 1,
-          });
-        }
-
-        logger.success(`Step ${i + 1} done (${(stepMs / 1000).toFixed(1)}s)`);
-        this.metrics.recordStep(true);
-        
-        // ── Validation Loop ────────────────────────────────────────────────
-        // Run validation after each step that might have changed code
-        if (this._isCodeChangingStep(step, result)) {
-          const validation = await this.validator.validate();
-          
-          if (validation.phase === 'build') this.metrics.recordBuild(validation.success);
-          if (validation.phase === 'test') this.metrics.recordTest(validation.success);
-
-          if (!validation.success) {
-            logger.warn(`Validation failed after Step ${i + 1}: ${validation.phase} error`);
-            const repaired = await this._repairLoop(validation, step, baseContext);
-            this.metrics.recordRepair(repaired);
-            if (!repaired) {
-              logger.error(`Repair loop failed after Step ${i + 1}`);
-              this.executionLog[this.executionLog.length - 1].validationFailed = true;
-            } else {
-              logger.success(`Repair successful after Step ${i + 1}`);
-            }
-          } else {
-            logger.success(`Validation passed after Step ${i + 1}`);
-          }
-        }
-
-        this.taskManager.completeStep(i, result);
-        finalResult += `Step ${i + 1}: ${step}\n${result}\n\n`;
-      } catch (err) {
-        const stepMs = Date.now() - stepStart;
-
-        if (this.traceLogger) {
-          this.traceLogger.logStep(stepId, step, 'error', stepMs, {
-            error: err.message,
-            stepIndex: i + 1,
-          });
-        }
-
-        logger.error(`Step ${i + 1} failed: ${err.message}`);
-        this.metrics.recordStep(false);
-        this.taskManager.failStep(i, err.message);
-        finalResult += `Step ${i + 1}: ${step}\nERROR: ${err.message}\n\n`;
-
-        this.executionLog.push({
-          index: i + 1,
-          step,
-          summary: `FAILED: ${err.message}`,
-          durationMs: stepMs,
-          failed: true,
-        });
-      }
+      this._createGitCheckpoint(task, 'post-task');
+      this.session.rememberTask(task, finalResult.substring(0, 500));
+      this.metrics.recordTask(this.taskManager.state.status === 'completed' && finalValidation.success, Date.now() - startTime);
+      return finalResult;
+    } finally {
+      try { await this.gateway.closeSession(); } catch {}
+      if (this.traceLogger) this.traceLogger.close();
     }
+  }
 
-    // ── Final Validation (Definition of Done) ──────────────────────────────
-    logger.header('Final Validation');
-    const finalValidation = await this.validator.validate();
-    if (finalValidation.success) {
-      logger.success('Project satisfies Definition of Done: Build and Tests pass.');
-      finalResult += `\nFinal Validation: PASSED ✓\n`;
-    } else {
-      logger.warn(`Project does NOT satisfy Definition of Done: ${finalValidation.phase} failed.`);
-      finalResult += `\nFinal Validation: FAILED ✗ (${finalValidation.phase})\n${finalValidation.error}\n`;
-    }
+  async _executeStep(index, step, totalSteps, task, baseContext) {
+    const stepStart = Date.now();
+    const before = this._snapshotWorkspace();
+    const stepId = `step_${index + 1}`;
 
-    // ── Post-task git commit ───────────────────────────────────────────────
-    if (this.gitManager.isRepo()) {
-      try {
-        const status = this.gitManager._run('git status --porcelain');
-        if (status) {
-          this.gitManager.stageAll();
-          this.gitManager.commit(`SeekCode: ${task.substring(0, 72)}`);
-          logger.success('Changes committed to git');
-        } else {
-          logger.info('No file changes to commit');
-        }
-      } catch (err) {
-        logger.warn(`Post-task git commit failed: ${err.message}`);
-      }
+    this.taskManager.updateStepStatus(index, 'in-progress');
+    logger.header(`Step ${index + 1}/${totalSteps}: ${step.substring(0, 80)}`);
+    this.journal.record('step-start', { index: index + 1, step });
 
-      if (this.traceLogger) {
-        this.traceLogger.logEvent('git_commit', { task: task.substring(0, 72) });
-      }
-    }
-
-    this.session.rememberTask(task, finalResult.substring(0, 500));
-    this.metrics.recordTask(this.taskManager.state.status === 'completed', Date.now() - startTime);
-    try { await this.gateway.closeSession(); } catch {}
-
-    if (this.traceLogger) {
-      this.traceLogger.logEvent('run_complete', {
-        resultLength: finalResult.length,
-        stepsCompleted: plan.steps.length,
-      });
-      this.traceLogger.close();
-    }
-
-    return finalResult;
-    }
-
-    // ── Helpers ────────────────────────────────────────────────────────────────
-
-    _isCodeChangingStep(step, result) {
-    const codeKeywords = ['write', 'edit', 'modify', 'change', 'create', 'update', 'fix', 'refactor', 'implement', 'add', 'remove', 'delete'];
-    const toolKeywords = ['write_file', 'replace_in_file', 'run_command'];
-
-    const lowerStep = step.toLowerCase();
-    const lowerResult = result.toLowerCase();
-
-    return codeKeywords.some(kw => lowerStep.includes(kw)) || toolKeywords.some(kw => lowerResult.includes(kw));
-    }
-
-    async _evaluateConfidence(task, plan, baseContext) {
     const prompt = [
-      'You are SeekCode, an expert AI software engineer.',
-      'Evaluate your confidence in successfully completing the following task based on the plan and project context.',
-      '',
-      'TASK: ' + task,
-      'PLAN:',
-      JSON.stringify(plan.steps, null, 2),
+      'You are SeekCode, executing one step of a larger multi-step task.',
+      'Read the prior steps carefully. Do not repeat work already done.',
       '',
       'PROJECT CONTEXT:',
       baseContext,
       '',
-      'Rate your confidence from 0 to 100.',
-      'Output ONLY a JSON object: {"confidence": 85, "reason": "..."}. No other text.'
+      'OVERALL TASK:',
+      task,
+      '',
+      this._priorWork(),
+      `CURRENT STEP (${index + 1}/${totalSteps}):`,
+      step,
+      '',
+      'Execute this step using tools. When done, output ONLY a plain-text summary of what you did.'
     ].join('\n');
 
     try {
-      const response = await this.gateway.chat(prompt);
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const result = JSON.parse(jsonMatch[0]);
-        return result.confidence || 50;
+      const result = await this.gateway.chat(prompt);
+      const changedFiles = this._diffSnapshot(before, this._snapshotWorkspace());
+      const durationMs = Date.now() - stepStart;
+
+      this.executionLog.push({ index: index + 1, step, summary: result.substring(0, 400), durationMs });
+      this.executionLog = this.executionLog.slice(-8);
+      this.metrics.recordStep(true);
+      this.journal.record('step-complete', { index: index + 1, durationMs, changedFiles, result: result.substring(0, 1000) });
+
+      if (changedFiles.length > 0 || this._resultMentionsToolMutation(result)) {
+        const validation = await this.validator.validate();
+        this.metrics.recordValidation(validation);
+        this.journal.record('validation', { index: index + 1, changedFiles, success: validation.success, phase: validation.phase, error: validation.error });
+
+        if (!validation.success) {
+          const repaired = await this._repairLoop(validation, step, baseContext);
+          this.metrics.recordRepair(repaired);
+          if (!repaired) this.executionLog[this.executionLog.length - 1].validationFailed = true;
+        } else {
+          this.checkpoints.create('milestone-complete', {
+            filesChanged: changedFiles,
+            completedTasks: this.taskManager.state.steps.filter((s, i) => i <= index && s.status === 'completed').map(s => s.description),
+            validationStatus: { success: true }
+          });
+        }
       }
+
+      this.taskManager.completeStep(index, result);
+      if (this.traceLogger) this.traceLogger.logStep(stepId, step, 'complete', durationMs, { changedFiles });
+      return `Step ${index + 1}: ${step}\n${result}\n\n`;
     } catch (err) {
-      logger.warn(`Confidence evaluation failed: ${err.message}`);
+      const durationMs = Date.now() - stepStart;
+      this.metrics.recordStep(false);
+      this.taskManager.failStep(index, err.message);
+      this.journal.record('step-failed', { index: index + 1, durationMs, error: err.message });
+      if (this.traceLogger) this.traceLogger.logStep(stepId, step, 'error', durationMs, { error: err.message });
+      return `Step ${index + 1}: ${step}\nERROR: ${err.message}\n\n`;
     }
-    return 50; // default to 50 if evaluation fails
   }
 
   async _repairLoop(validation, step, baseContext, maxRetries = 3) {
     let currentValidation = validation;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      logger.info(`Repair attempt ${attempt}/${maxRetries} for ${currentValidation.phase} failure...`);
+      const fingerprint = ErrorFingerprint.hash(currentValidation.error || currentValidation.output || '');
+      const attempts = (this.repairFingerprints.get(fingerprint) || 0) + 1;
+      this.repairFingerprints.set(fingerprint, attempts);
 
+      this.journal.record('repair-attempt', {
+        fingerprint,
+        attempts,
+        phase: currentValidation.phase,
+        error: currentValidation.error
+      });
+
+      if (attempts > 1) {
+        logger.warn(`Stopping repair: identical failure repeated (${fingerprint})`);
+        return false;
+      }
+
+      logger.info(`Repair attempt ${attempt}/${maxRetries} for ${currentValidation.phase} failure...`);
       const repairPrompt = [
-        'You are SeekCode, an expert AI software engineer. A validation check failed after you executed a step.',
+        'A validation check failed after a step.',
         '',
         'PHASE FAILED: ' + currentValidation.phase,
         'ERROR OUTPUT:',
@@ -389,24 +222,118 @@ class EnhancedOrchestrator {
         'PROJECT CONTEXT:',
         baseContext,
         '',
-        'TASK: Diagnose the error and fix it using tools. When done, output ONLY a summary of your repair.',
+        'Diagnose and fix the error using tools. Output ONLY a repair summary.'
       ].join('\n');
 
       try {
-        const repairResult = await this.gateway.chat(repairPrompt);
-        logger.info(`Repair attempt ${attempt} completed. Re-validating...`);
-
+        await this.gateway.chat(repairPrompt);
         currentValidation = await this.validator.validate();
+        this.metrics.recordValidation(currentValidation);
         if (currentValidation.success) {
+          this.journal.record('repair-success', { fingerprint });
+          this.checkpoints.create('repair-success', { validationStatus: { success: true } });
           return true;
         }
       } catch (err) {
-        logger.error(`Repair attempt ${attempt} failed with error: ${err.message}`);
+        this.journal.record('repair-error', { fingerprint, error: err.message });
       }
     }
 
     return false;
-    }
-    }
+  }
 
-    module.exports = { EnhancedOrchestrator };
+  _baseContext() {
+    return JSON.stringify({
+      project: this.analyzer.getSummary(),
+      dependencyGraph: this.analyzer.getDependencyGraph().toJSON(),
+      recentTasks: this.session.getRecentTasks()
+    }, null, 2);
+  }
+
+  _quickAnswer() {
+    const summary = this.analyzer.getSummary();
+    const files = this.analyzer.getDependencyGraph().getAllFiles();
+    return [
+      `Project: ${summary.project}`,
+      `Framework: ${summary.meta.framework || 'none'}`,
+      `Language: ${summary.meta.language}`,
+      `Files: ${files.length} source files`,
+      `Top-level modules: ${files.filter(f => !f.includes('/')).join(', ')}`
+    ].join('\n');
+  }
+
+  _priorWork() {
+    if (this.executionLog.length === 0) return '';
+    return [
+      'PRIOR STEPS COMPLETED:',
+      ...this.executionLog.slice(-4).map(e => `  Step ${e.index}: ${e.step}\n  Result: ${e.summary}`),
+      ''
+    ].join('\n');
+  }
+
+  _snapshotWorkspace() {
+    const files = [];
+    const skip = new Set(['.git', 'node_modules', '.seekcode']);
+    const walk = dir => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (skip.has(entry.name)) continue;
+        const abs = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(abs);
+        else {
+          const stat = fs.statSync(abs);
+          files.push({
+            file: path.relative(this.projectPath, abs).replace(/\\/g, '/'),
+            size: stat.size,
+            mtimeMs: stat.mtimeMs
+          });
+        }
+      }
+    };
+    walk(this.projectPath);
+    return new Map(files.map(f => [f.file, crypto.createHash('sha1').update(`${f.size}:${f.mtimeMs}`).digest('hex')]));
+  }
+
+  _diffSnapshot(before, after) {
+    const changed = [];
+    for (const [file, sig] of after) {
+      if (before.get(file) !== sig) changed.push(file);
+    }
+    for (const file of before.keys()) {
+      if (!after.has(file)) changed.push(file);
+    }
+    return changed.sort();
+  }
+
+  _resultMentionsToolMutation(result) {
+    const text = String(result).toLowerCase();
+    return ['write_file', 'replace_in_file', 'delete_file', 'move_file', 'npm install', 'package.json'].some(token => text.includes(token));
+  }
+
+  _confidenceEvidence(plan) {
+    const pkg = path.join(this.projectPath, 'package.json');
+    const summary = this.analyzer.getSummary();
+    return {
+      frameworkRecognized: Boolean(summary.meta?.framework),
+      languageRecognized: Boolean(summary.meta?.language),
+      packageJsonFound: fs.existsSync(pkg),
+      buildCommandDetected: Boolean(this.validator.buildCommand),
+      testCommandDetected: Boolean(this.validator.testCommand),
+      planSteps: plan.steps?.length || 0
+    };
+  }
+
+  _createGitCheckpoint(task, label) {
+    if (!this.gitManager?.isRepo()) return;
+    try {
+      const status = this.gitManager._run('git status --porcelain');
+      if (status) {
+        this.gitManager.stageAll();
+        this.gitManager.commit(`seekcode: ${label} ${task.substring(0, 60)}`);
+      }
+    } catch (err) {
+      logger.warn(`${label} git checkpoint failed (non-fatal): ${err.message}`);
+    }
+  }
+}
+
+module.exports = { EnhancedOrchestrator };

@@ -3,6 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { atomicWriteJson } = require('./utils/atomicWrite');
 
 class StateRecovery {
   constructor(projectPath) {
@@ -36,7 +37,7 @@ class StateRecovery {
       fs.copyFileSync(stateFile, backup);
     }
     
-    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+    atomicWriteJson(stateFile, state);
     
     if (fs.existsSync(backup)) {
       fs.unlinkSync(backup);
