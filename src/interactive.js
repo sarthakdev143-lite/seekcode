@@ -1,18 +1,19 @@
 const { SeekCodeAgent } = require('./agent/SeekCodeAgent');
 const logger = require('./logger');
-const { AutoComplete } = require('enquirer');
+const readline = require('readline');
 const chalk = require('chalk');
 const ora = require('ora');
 const fs = require('fs');
 const path = require('path');
 
-// ... marked setup ...
-
 async function interactiveMode(projectPath) {
   const agent = new SeekCodeAgent(projectPath);
-
-  // Banner...
-
+  
+  // Banner
+  console.log('\n' + chalk.cyan.bold(' ╔════════════════════════════════════════════╗'));
+  console.log(chalk.cyan.bold(' ║') + chalk.white.bold('           SeekCode Agentic CLI           ') + chalk.cyan.bold('║'));
+  console.log(chalk.cyan.bold(' ╚════════════════════════════════════════════╝'));
+  
   const spinner = ora('Agent initializing...').start();
   try {
     await agent.init();
@@ -23,32 +24,31 @@ async function interactiveMode(projectPath) {
     process.exit(1);
   }
 
-  // Get file list for @-completion
+  // Get file list for tab-completion
   const files = agent.analyzer.getDependencyGraph().getAllFiles();
 
-  console.log(chalk.dim('\nType your task. Use @ to reference files.\n'));
+  // Tab completion function
+  function completer(line) {
+    const hits = files.filter(f => f.startsWith(line.split('@').pop()));
+    return [hits.map(h => '@' + h), line];
+  }
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    completer: completer
+  });
+
+  const ask = () => new Promise(resolve => {
+    rl.question(chalk.cyan('\n❯ ') + chalk.dim('Task: '), resolve);
+  });
+
+  console.log(chalk.dim('\nType your task. Use @ to reference files (press Tab to autocomplete).\n'));
 
   while (true) {
-    const prompt = new AutoComplete({
-      name: 'task',
-      message: chalk.cyan('❯'),
-      limit: 10,
-      choices: files.map(f => ({ name: `@${f}`, message: f })),
-      suggest(input, choices) {
-        if (input.startsWith('@')) {
-          const search = input.slice(1);
-          return choices.filter(c => c.message.includes(search));
-        }
-        return [];
-      },
-      format(value) {
-        return value || '';
-      }
-    });
-
     let input;
     try {
-      input = await prompt.run();
+      input = await ask();
     } catch (err) {
       break; 
     }
@@ -64,9 +64,13 @@ async function interactiveMode(projectPath) {
       for (const match of matches) {
         const filePath = match.slice(1);
         try {
-          const absPath = path.join(projectPath, filePath);
-          const content = fs.readFileSync(absPath, 'utf8');
-          finalInput = finalInput.replace(match, `\nFILE: ${filePath}\n${content}\n`);
+          const absPath = path.resolve(projectPath, filePath);
+          if (fs.existsSync(absPath)) {
+            const content = fs.readFileSync(absPath, 'utf8');
+            finalInput = finalInput.replace(match, `\n--- FILE: ${filePath} ---\n${content}\n------------------------\n`);
+          } else {
+            logger.warn(`File not found: ${filePath}`);
+          }
         } catch (e) {
           logger.warn(`Could not read file for context: ${filePath}`);
         }
@@ -95,6 +99,7 @@ async function interactiveMode(projectPath) {
     }
   }
 
+  rl.close();
   await agent.shutdown();
   console.log(chalk.cyan.bold('\nGoodbye! 👋\n'));
 }
