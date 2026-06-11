@@ -6,4 +6,13 @@ module.exports = {
   SUPPORTED_EXTENSIONS: ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'],
   MAX_FILE_SIZE_BYTES: 5 * 1024 * 1024,
   PARSE_CONCURRENCY: 4,
+  MAX_CONTEXT_TOKENS: 120000,
+  SECURITY_POLICY: {
+    approvalRequired: { delete: true, writeOutsideProject: true, network: true, shell: true, install: true },
+    allowNetwork: false,
+  },
+  DOCKER_IMAGE: 'node:20-alpine',
+  DOCKER_MEMORY: '512m',
+  ALLOW_NETWORK: false,
+  COMMAND_TIMEOUT: 60000,
 };
