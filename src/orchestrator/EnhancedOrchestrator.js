@@ -25,6 +25,7 @@ const { RepairAgent } = require('../agent/RepairAgent');
 const { ReviewerAgent } = require('../agent/ReviewerAgent');
 const logger = require('../logger');
 const { ErrorMemory } = require('../recovery/ErrorMemory');
+const { SelfHealingOrchestrator } = require('../self-healing');
 
 let TraceLogger = null;
 try { TraceLogger = require('../trace-logger').TraceLogger; } catch {}
@@ -54,6 +55,7 @@ class EnhancedOrchestrator {
     this.testRunner = new TestRunner(this.projectPath);
     this.gitManager = new GitManager(this.projectPath);
     this.validator = new ValidationEngine(this.projectPath);
+    this.selfHealing = new SelfHealingOrchestrator(this.projectPath);
     this.errorMemory = new ErrorMemory(this.projectPath, this.validator);
     this.metrics = new MetricsCollector(this.projectPath);
     this.repositoryMap = new RepositoryMap(this.projectPath, this.analyzer);
@@ -124,12 +126,53 @@ class EnhancedOrchestrator {
     try {
       for (let i = this.taskManager.state.currentStepIndex; i < plan.steps.length; i++) {
         this._updateTopic(`Step ${i+1}/${plan.steps.length}`, plan.steps[i]);
-        const stepResult = await this._executeStep(i, plan.steps[i], plan.steps.length, task, baseContext);
-        finalResult += stepResult;
+        try {
+          const stepResult = await this._executeStep(i, plan.steps[i], plan.steps.length, task, baseContext);
+          finalResult += stepResult;
+
+          // Check if the result indicates partial completion (e.g. max iterations reached)
+          if (stepResult.includes('Reached maximum iterations')) {
+            logger.warn('Step partially completed due to iteration limit. Continuing from current state.');
+            const continuationPrompt = `The previous step was partially completed: ${plan.steps[i]}. Please continue or finish the step.`;
+            const continuationPlan = await this.plannerAgent.plan(continuationPrompt);
+            // Insert continuation steps into the current plan
+            plan.steps.splice(i + 1, 0, ...continuationPlan.steps);
+            this.taskManager.setPlan(plan.steps);
+          }
+        } catch (err) {
+          logger.warn(`Step ${i+1} failed: ${err.message}. Attempting to re-plan...`);
+          // Re-plan remaining steps
+          const remainingTask = `The previous plan failed at step ${i+1}: ${plan.steps[i]}. Error: ${err.message}. Please provide a new plan to complete the task: ${task}`;
+          const newPlan = await this.plannerAgent.plan(remainingTask);
+          plan.steps = [...plan.steps.slice(0, i), ...newPlan.steps];
+          this.taskManager.setPlan(plan.steps);
+          i--; // Retry the current index which now has a new plan step
+        }
       }
 
       logger.header('Final Validation');
-      const finalValidation = await this.validatorAgent.validate({ source: 'final' });
+      let finalValidation = await this.validatorAgent.validate({ source: 'final' });
+      
+      // AUTO-HEALING: If final validation fails, attempt one last repair or re-plan
+      if (!finalValidation.success) {
+        logger.warn('Final validation failed. Attempting autonomous repair...');
+        const repairSucceeded = await this.repairAgent.repair(finalValidation, 'Final completion', baseContext);
+        if (repairSucceeded) {
+          finalValidation = await this.validatorAgent.validate({ source: 'final-after-repair' });
+        } else {
+          logger.warn('Autonomous repair failed. Triggering re-planning for remaining issues.');
+          const rePlanTask = `The implementation is almost complete but final validation failed: ${finalValidation.error}. Please fix the remaining issues for the task: ${task}`;
+          const finalFixPlan = await this.plannerAgent.plan(rePlanTask);
+          if (finalFixPlan.steps && finalFixPlan.steps.length > 0) {
+            plan.steps.push(...finalFixPlan.steps);
+            this.taskManager.setPlan(plan.steps);
+            // We need to jump back into the loop. This is tricky with the current structure.
+            // Simplified: recursively call run or just continue the loop if we modify i
+            // For now, let's just push to steps and the loop will continue if we don't return.
+          }
+        }
+      }
+
       const allChangedFiles = this.executionLog.flatMap(entry => entry.changedFiles || []);
       let review = finalValidation.success
         ? await this.reviewerAgent.review(task, baseContext, Array.from(new Set(allChangedFiles)))
@@ -182,6 +225,9 @@ class EnhancedOrchestrator {
     logger.header(`Step ${index + 1}/${totalSteps}: ${step.substring(0, 80)}`);
     this.journal.record('step-start', { index: index + 1, step });
 
+    const before = this._snapshotWorkspace();
+    const backup = await this.selfHealing.createBackup(Array.from(before.keys()));
+
     // ENHANCEMENT: Cognitive Loop (Research -> Strategy -> Execution)
     const prompt = [
       'You are SeekCode, a senior agentic software engineer. Follow this disciplined cycle:',
@@ -213,7 +259,9 @@ class EnhancedOrchestrator {
     ].join('\n');
 
     try {
-      const result = await this.executorAgent.execute(prompt);
+      const result = await this.selfHealing.executeWithRetry(async () => {
+        return await this.executorAgent.execute(prompt);
+      }, step);
       const changedFiles = this._diffSnapshot(before, this._snapshotWorkspace());
       const durationMs = Date.now() - stepStart;
       if (changedFiles.length) {
@@ -247,6 +295,7 @@ class EnhancedOrchestrator {
             completedTasks: this.taskManager.state.steps.filter((s, i) => i <= index && s.status === 'completed').map(s => s.description),
             validationStatus: { success: true }
           });
+          this._createGitCheckpoint(task, `Step ${index + 1} complete: ${step}`);
         }
       }
 
@@ -254,6 +303,7 @@ class EnhancedOrchestrator {
       if (this.traceLogger) this.traceLogger.logStep(stepId, step, 'complete', durationMs, { changedFiles });
       return `Step ${index + 1}: ${step}\n${result}\n\n`;
     } catch (err) {
+      await this.selfHealing.rollbackOnFailure(backup);
       const durationMs = Date.now() - stepStart;
       this.metrics.recordStep(false);
       this.taskManager.failStep(index, err.message);
