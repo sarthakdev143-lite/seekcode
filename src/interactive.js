@@ -36,11 +36,47 @@ async function interactiveMode(projectPath) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    completer: completer
+    completer: completer,
+    terminal: true
   });
 
-  const ask = () => new Promise(resolve => {
-    rl.question(chalk.cyan('\n❯ ') + chalk.dim('Task: '), resolve);
+  const getTask = () => new Promise((resolve, reject) => {
+    let input = '';
+    console.log(chalk.cyan('\n❯ ') + chalk.dim('Enter task (blank line or Ctrl+D to submit):'));
+
+    const cleanup = () => {
+      rl.removeListener('line', onLine);
+      rl.removeListener('close', onClose);
+    };
+
+    const onLine = (line) => {
+      if (line.trim() === '') {
+        cleanup();
+        // If nothing typed yet, keep waiting
+        if (!input) {
+          console.log(chalk.cyan('\n❯ ') + chalk.dim('Enter task (blank line or Ctrl+D to submit):'));
+          rl.on('line', onLine);
+          rl.once('close', onClose);
+          return;
+        }
+        resolve(input.trim());
+      } else {
+        input += (input ? '\n' : '') + line;
+      }
+    };
+
+    const onClose = () => {
+      cleanup();
+      // Ctrl+D — submit whatever we have, or break the loop
+      if (input.trim()) {
+        resolve(input.trim());
+      } else {
+        reject(new Error('EOF'));
+      }
+    };
+
+    rl.on('line', onLine);
+    rl.once('close', onClose);
   });
 
   console.log(chalk.dim('\nType your task. Use @ to reference files (press Tab to autocomplete).\n'));
@@ -48,12 +84,11 @@ async function interactiveMode(projectPath) {
   while (true) {
     let input;
     try {
-      input = await ask();
+      input = await getTask();
     } catch (err) {
       break; 
     }
 
-    input = input.trim();
     if (!input) continue;
     if (['exit', 'quit', 'q'].includes(input.toLowerCase())) break;
 

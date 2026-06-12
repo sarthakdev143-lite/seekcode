@@ -34,7 +34,7 @@ try { TraceLogger = require('../trace-logger').TraceLogger; } catch {}
 class EnhancedOrchestrator {
   constructor(projectPath) {
     this.projectPath = path.resolve(projectPath);
-    this.gateway = new GatewayClient();
+    this.gateway = new GatewayClient(this.projectPath);
     this.session = new SessionMemory();
     this.executionLog = [];
     this.traceLogger = null;

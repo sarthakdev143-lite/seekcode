@@ -13,7 +13,7 @@ try { TraceLogger = require('../trace-logger').TraceLogger; } catch { }
 class SeekCodeAgent {
   constructor(projectPath) {
     this.projectPath = projectPath;
-    this.gateway = new GatewayClient();
+    this.gateway = new GatewayClient(this.projectPath);
     this.analyzer = null;
     this.conversationHistory = [];
     this.contextManager = new ContextManager({

@@ -3,12 +3,19 @@ const config = require('./config');
 const logger = require('./logger');
 
 class GatewayClient {
-  constructor() { this.baseUrl = config.GATEWAY_URL; this.sessionId = null; }
+  constructor(projectPath) {
+    this.baseUrl = config.GATEWAY_URL;
+    this.sessionId = null;
+    this.projectPath = projectPath || null;
+  }
 
   async createSession() {
+    const body = {};
+    if (this.projectPath) body.workingDir = this.projectPath;
     const res = await fetch(this.baseUrl + '/session/create', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
     });
     const data = await res.json();
     if (data.sessionId) {
