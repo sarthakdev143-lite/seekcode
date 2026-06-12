@@ -39,11 +39,24 @@ class EnhancedOrchestrator {
     this.executionLog = [];
     this.traceLogger = null;
 
-    if (process.env.SEEKCODE_TRACE === '1' && TraceLogger) {
-      const sessionId = `orchestrator_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    // Always enable tracing — no env var gate.
+    // Logs go to <projectPath>/.seekcode/traces/ and ~/.seekcode/logs/
+    if (TraceLogger) {
+      const sessionId = `orch_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
       this.traceLogger = new TraceLogger(sessionId, this.projectPath);
       this.traceLogger.logEvent('orchestrator_init', { projectPath: this.projectPath });
+      // Print log path so the user knows where to look
+      const logPath = this.traceLogger.projectLogPath;
+      if (logPath) {
+        logger.info(`📝 Trace log: ${logPath}`);
+        logger.info(`📝 Global log: ${this.traceLogger.globalLogPath}`);
+      }
     }
+  }
+
+  /** Convenience — log an event without guards everywhere */
+  _log(event, data = {}) {
+    if (this.traceLogger) this.traceLogger.logEvent(event, data);
   }
 
   async init() {
@@ -75,11 +88,10 @@ class EnhancedOrchestrator {
     const pendingTaskId = TaskManager.findPendingTask(this.projectPath, explicitTaskId);
     const baseContext = this._baseContext();
     let plan;
+    const runStart = Date.now();
 
-    if (this.traceLogger) this.traceLogger.logEvent('run_start', { task, options });
+    this._log('run_start', { task, options, pendingTaskId });
     this._createGitCheckpoint(task, 'pre-task');
-
-    // FEATURE 2: Strategic Intent (Topic Model)
     this._updateTopic('Initializing', `Starting task: ${task}`);
 
     await this.gateway.createSession();
@@ -91,9 +103,13 @@ class EnhancedOrchestrator {
         logger.info(`Resuming task: ${pendingTaskId}`);
         this.taskManager = new TaskManager(this.projectPath, pendingTaskId);
         plan = { steps: this.taskManager.state.steps.map(s => s.description) };
+        this._log('plan_resumed', { taskId: pendingTaskId, steps: plan.steps });
       } else {
         this._updateTopic('Planning', 'Generating strategic execution plan and semantic mapping');
+        this._log('plan_start', { task });
         plan = await this.plannerAgent.plan(task);
+        this._log('plan_created', { steps: plan.steps, relatedFiles: plan.relatedFiles, quickAnswer: !!plan.quickAnswer });
+
         if (plan.quickAnswer) {
           const answer = this._quickAnswer();
           await this.gateway.closeSession();
@@ -136,45 +152,45 @@ class EnhancedOrchestrator {
           const stepResult = await this._executeStep(i, plan.steps[i], plan.steps.length, task, baseContext);
           finalResult += stepResult;
 
-          // Check if the result indicates partial completion (e.g. max iterations reached)
           if (stepResult.includes('Reached maximum iterations')) {
             logger.warn('Step partially completed due to iteration limit. Continuing from current state.');
+            this._log('step_iteration_limit', { stepIndex: i, step: plan.steps[i] });
             const continuationPrompt = `The previous step was partially completed: ${plan.steps[i]}. Please continue or finish the step.`;
             const continuationPlan = await this.plannerAgent.plan(continuationPrompt);
-            // Insert continuation steps into the current plan
             plan.steps.splice(i + 1, 0, ...continuationPlan.steps);
             this.taskManager.setPlan(plan.steps);
           }
         } catch (err) {
           logger.warn(`Step ${i+1} failed: ${err.message}. Attempting to re-plan...`);
-          // Re-plan remaining steps
+          this._log('step_replan', { stepIndex: i, step: plan.steps[i], error: err.message });
           const remainingTask = `The previous plan failed at step ${i+1}: ${plan.steps[i]}. Error: ${err.message}. Please provide a new plan to complete the task: ${task}`;
           const newPlan = await this.plannerAgent.plan(remainingTask);
           plan.steps = [...plan.steps.slice(0, i), ...newPlan.steps];
           this.taskManager.setPlan(plan.steps);
-          i--; // Retry the current index which now has a new plan step
+          i--;
         }
       }
 
       logger.header('Final Validation');
       let finalValidation = await this.validatorAgent.validate({ source: 'final' });
-      
-      // AUTO-HEALING: If final validation fails, attempt one last repair or re-plan
+      this._log('validation_final', { success: finalValidation.success, phase: finalValidation.phase, error: finalValidation.error });
+
       if (!finalValidation.success) {
         logger.warn('Final validation failed. Attempting autonomous repair...');
+        this._log('repair_start', { trigger: 'final_validation', error: finalValidation.error });
         const repairSucceeded = await this.repairAgent.repair(finalValidation, 'Final completion', baseContext);
+        this._log('repair_end', { trigger: 'final_validation', success: repairSucceeded });
         if (repairSucceeded) {
           finalValidation = await this.validatorAgent.validate({ source: 'final-after-repair' });
+          this._log('validation_after_repair', { success: finalValidation.success });
         } else {
           logger.warn('Autonomous repair failed. Triggering re-planning for remaining issues.');
           const rePlanTask = `The implementation is almost complete but final validation failed: ${finalValidation.error}. Please fix the remaining issues for the task: ${task}`;
           const finalFixPlan = await this.plannerAgent.plan(rePlanTask);
+          this._log('replan_after_repair', { steps: finalFixPlan.steps });
           if (finalFixPlan.steps && finalFixPlan.steps.length > 0) {
             plan.steps.push(...finalFixPlan.steps);
             this.taskManager.setPlan(plan.steps);
-            // We need to jump back into the loop. This is tricky with the current structure.
-            // Simplified: recursively call run or just continue the loop if we modify i
-            // For now, let's just push to steps and the loop will continue if we don't return.
           }
         }
       }
@@ -183,14 +199,18 @@ class EnhancedOrchestrator {
       let review = finalValidation.success
         ? await this.reviewerAgent.review(task, baseContext, Array.from(new Set(allChangedFiles)))
         : { passed: false, findings: ['Skipped review because validation failed'] };
+      this._log('review_complete', { passed: review.passed, findings: review.findings?.slice(0, 5) });
       this.journal.record('review', review);
       let reviewRepairSucceeded = false;
 
       if (finalValidation.success && !review.passed) {
+        this._log('repair_review_start', { findings: review.findings?.slice(0, 5) });
         reviewRepairSucceeded = await this.repairAgent.repairReview(task, review, baseContext);
+        this._log('repair_review_end', { success: reviewRepairSucceeded });
         this.metrics.recordRepair(reviewRepairSucceeded);
         if (reviewRepairSucceeded) {
           review = await this.reviewerAgent.review(task, baseContext, Array.from(new Set(allChangedFiles)));
+          this._log('review_after_repair', { passed: review.passed });
           this.journal.record('review-after-repair', review);
         }
       }
@@ -211,9 +231,18 @@ class EnhancedOrchestrator {
 
       this._createGitCheckpoint(task, 'post-task');
       this.session.rememberTask(task, finalResult.substring(0, 500));
+      const totalDurationMs = Date.now() - runStart;
+      this._log('run_complete', {
+        totalDurationMs,
+        validationPassed: finalValidation.success,
+        reviewPassed: review.passed,
+        stepsCompleted: this.taskManager.state.steps.filter(s => s.status === 'completed').length,
+        totalSteps: plan.steps.length,
+      });
       this.metrics.recordTask(this.taskManager.state.status === 'completed' && finalValidation.success && review.passed, Date.now() - startTime);
       return finalResult;
     } catch (err) {
+      this._log('run_error', { error: err.message, stack: err.stack?.slice(0, 500) });
       this.metrics?.recordTask(false, Date.now() - startTime);
       throw err;
     } finally {
@@ -243,10 +272,13 @@ class EnhancedOrchestrator {
     let researchFindings = '';
     try {
       logger.info(`Starting codebase research for step ${index + 1}...`);
+      this._log('research_start', { stepIndex: index + 1, step, semanticFiles: semanticFiles.length });
       researchFindings = await this.researchAgent.research(task, step, baseContext, semanticFiles);
+      this._log('research_end', { stepIndex: index + 1, findingsLen: researchFindings.length });
       logger.success(`Research phase complete.`);
     } catch (researchErr) {
       logger.warn(`Research phase failed or timed out: ${researchErr.message}. Falling back to default step execution.`);
+      this._log('research_error', { stepIndex: index + 1, error: researchErr.message });
       researchFindings = `Research failed: ${researchErr.message}`;
     }
 
@@ -296,6 +328,7 @@ class EnhancedOrchestrator {
 
         if (!validation.success) {
           const repaired = await this.repairAgent.repair(validation, step, baseContext);
+          this._log('repair_step', { stepIndex: index + 1, success: repaired, error: validation.error });
           this.metrics.recordRepair(repaired);
           if (!repaired) {
             this.executionLog[this.executionLog.length - 1].validationFailed = true;

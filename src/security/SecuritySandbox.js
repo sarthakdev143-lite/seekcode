@@ -51,8 +51,8 @@ class CommandRiskAnalyzer {
     }
     if (/^rm\s+/.test(lower) || /^del\s+/.test(lower) || /^rmdir\s+/.test(lower)) {
       const target = command.slice(command.indexOf(' ') + 1).trim();
-      const resolved = path.resolve(target);
-      const cwd = process.cwd();
+      const cwd = this.policy.workDir || process.cwd();
+      const resolved = path.isAbsolute(target) ? target : path.resolve(cwd, target);
       if (!resolved.startsWith(cwd)) {
         return { level: 'high', reason: `Deleting outside project: ${resolved}`, requiresApproval: this.policy.approvalRequired.delete };
       }
@@ -84,10 +84,10 @@ class CommandRiskAnalyzer {
   }
 
   checkFileAccess(filePath, operation = 'read') {
-    const resolved = path.resolve(filePath);
-    const cwd = process.cwd();
+    const cwd = this.policy.workDir || process.cwd();
+    const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath);
     for (const blocked of this.policy.blockPaths) {
-      if (resolved.startsWith(path.resolve(blocked))) {
+      if (resolved.startsWith(path.isAbsolute(blocked) ? blocked : path.resolve(cwd, blocked))) {
         return { allowed: false, reason: `Path blocked: ${blocked}` };
       }
     }
@@ -170,7 +170,9 @@ class DockerSandbox {
     return new Promise((resolve, reject) => {
       let stdout = '', stderr = '';
       let killed = false;
-      const child = spawn('sh', ['-c', command], { cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = process.platform === 'win32'
+        ? spawn(command, [], { cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], shell: true })
+        : spawn('sh', ['-c', command], { cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
       const timer = setTimeout(() => { killed = true; child.kill('SIGTERM'); }, timeout);
       child.stdout.on('data', chunk => stdout += chunk);
       child.stderr.on('data', chunk => stderr += chunk);
@@ -222,9 +224,11 @@ class ApprovalManager {
 
 class SecuritySandbox {
   constructor(options = {}) {
+    this.workDir = options.workDir || process.cwd();
     this.policy = { ...DEFAULT_POLICY, ...(options.policy || {}) };
+    this.policy.workDir = this.workDir;
     this.analyzer = new CommandRiskAnalyzer(this.policy);
-    this.docker = new DockerSandbox(options.docker);
+    this.docker = new DockerSandbox({ ...options.docker, workDir: this.workDir });
     this.approval = new ApprovalManager(this.policy);
     this.auditLog = [];
   }
@@ -244,8 +248,9 @@ class SecuritySandbox {
     const fileMatches = command.match(/(?:^|\s)([\w\-./]+(?:\.[\w]+))/g) || [];
     for (const match of fileMatches) {
       const filePath = match.trim();
-      if (fs.existsSync(filePath)) {
-        const access = this.analyzer.checkFileAccess(filePath, 'read');
+      const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.workDir, filePath);
+      if (fs.existsSync(absPath)) {
+        const access = this.analyzer.checkFileAccess(absPath, 'read');
         if (!access.allowed) {
           this._audit('DENY_FILE', command, risk, access.reason);
           throw new Error(`Security: ${access.reason}`);

@@ -9,6 +9,7 @@ const { analyzeCommand } = require('./commands/analyze');
 const { planCommand } = require('./commands/plan');
 const { runCommand } = require('./commands/run');
 const { benchmarkCommand } = require('./commands/benchmark');
+const { logsCommand } = require('./commands/logs');
 const { ProjectAnalyzer } = require('./analyzer/ProjectAnalyzer');
 
 const { TraceLogger } = require('./trace-logger');
@@ -147,6 +148,17 @@ program
   .action(async (action, project, options) => {
     if (action !== 'run') { console.error('Only "benchmark run" is supported'); process.exit(1); }
     await benchmarkCommand(project || process.cwd(), options);
+  });
+
+program
+  .command('logs [session]')
+  .description('View orchestration trace logs for a project')
+  .option('-p, --project <dir>', 'Project directory (default: cwd)')
+  .option('-s, --summary', 'Show summary only')
+  .option('-l, --last', 'Show the most recent session')
+  .option('--gateway', 'Show gateway-level JSONL logs instead of orchestration traces')
+  .action(async (session, options) => {
+    await logsCommand(session, options);
   });
 
 // If no subcommand is provided, enter interactive mode
