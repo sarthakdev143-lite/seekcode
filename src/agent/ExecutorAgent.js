@@ -6,7 +6,7 @@ class ExecutorAgent {
   }
 
   async execute(prompt) {
-    return this.gateway.chat(prompt);
+    return this.gateway.chat(prompt, 'coder', 'R1');
   }
 }
 

@@ -58,7 +58,7 @@ class RepairAgent {
         'Diagnose and fix the error using tools. Output ONLY a repair summary.'
       ].join('\n');
 
-      await this.gateway.chat(repairPrompt);
+      await this.gateway.chat(repairPrompt, 'coder', 'R1');
       currentValidation = await this.validatorAgent.validate({ source: 'repair', fingerprint });
       if (currentValidation.success) {
         this.journal?.record('repair-success', { fingerprint });
@@ -97,7 +97,7 @@ class RepairAgent {
       baseContext
     ].join('\n');
 
-    await this.gateway.chat(prompt);
+    await this.gateway.chat(prompt, 'coder', 'R1');
     const validation = await this.validatorAgent.validate({ source: 'review-repair' });
     const success = validation.success;
     this.journal?.record('review-repair-validation', { success, phase: validation.phase, error: validation.error });

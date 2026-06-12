@@ -1,4 +1,4 @@
-﻿const path = require('path');
+const path = require('path');
 const logger = require('../logger');
 
 class TaskPlanner {
@@ -93,7 +93,7 @@ class TaskPlanner {
       'USER TASK: ' + task
     ].join('\n');
 
-    const response = await this.gateway.chat(prompt);
+    const response = await this.gateway.chat(prompt, 'planner', 'R1');
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const plan = JSON.parse(jsonMatch[0]);

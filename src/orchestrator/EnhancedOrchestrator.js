@@ -19,6 +19,7 @@ const { CheckpointManager } = require('./CheckpointManager');
 const { RepositoryMap } = require('../semantic/RepositoryMap');
 const { SemanticSearch } = require('../semantic/SemanticSearch');
 const { PlannerAgent } = require('../agent/PlannerAgent');
+const { ResearchAgent } = require('../agent/ResearchAgent');
 const { ExecutorAgent } = require('../agent/ExecutorAgent');
 const { ValidatorAgent } = require('../agent/ValidatorAgent');
 const { RepairAgent } = require('../agent/RepairAgent');
@@ -62,6 +63,7 @@ class EnhancedOrchestrator {
     this.repositoryMap.build();
     this.semanticSearch = new SemanticSearch(this.repositoryMap);
     this.plannerAgent = new PlannerAgent(this.planner, this.semanticSearch);
+    this.researchAgent = new ResearchAgent(this.gateway);
     this.executorAgent = new ExecutorAgent(this.gateway);
 
     logger.success('Enhanced orchestrator initialized');
@@ -225,27 +227,37 @@ class EnhancedOrchestrator {
     logger.header(`Step ${index + 1}/${totalSteps}: ${step.substring(0, 80)}`);
     this.journal.record('step-start', { index: index + 1, step });
 
-    const before = this._snapshotWorkspace();
     const backup = await this.selfHealing.createBackup(Array.from(before.keys()));
 
     // ENHANCEMENT: Cognitive Loop (Research -> Strategy -> Execution)
+    const semanticFiles = this.semanticSearch.search(`${task} ${step}`, 8).map(r => ({
+      path: r.path,
+      score: Number(r.score.toFixed(3)),
+      symbols: r.symbols.slice(0, 8)
+    }));
+
+    let researchFindings = '';
+    try {
+      logger.info(`Starting codebase research for step ${index + 1}...`);
+      researchFindings = await this.researchAgent.research(task, step, baseContext, semanticFiles);
+      logger.success(`Research phase complete.`);
+    } catch (researchErr) {
+      logger.warn(`Research phase failed or timed out: ${researchErr.message}. Falling back to default step execution.`);
+      researchFindings = `Research failed: ${researchErr.message}`;
+    }
+
     const prompt = [
       'You are SeekCode, a senior agentic software engineer. Follow this disciplined cycle:',
       '',
-      '1. RESEARCH: You must understand the relevant code before changing it. Use tools like `read_file` and `find_files`.',
-      '2. STRATEGY: Explain your planned changes concisely before executing.',
-      '3. EXECUTION: Use surgical tools (replace_in_file) whenever possible. Avoid full-file rewrites.',
-      '4. VALIDATION: After every change, run tests or build to verify.',
+      '1. STRATEGY: Explain your planned changes concisely before executing.',
+      '2. EXECUTION: Use surgical tools (replace_in_file) whenever possible. Avoid full-file rewrites.',
+      '3. VALIDATION: After every change, run tests or build to verify.',
+      '',
+      'RESEARCH FINDINGS (from Researcher Agent):',
+      researchFindings,
       '',
       'PROJECT CONTEXT:',
       baseContext,
-      '',
-      'SEMANTICALLY RELATED FILES:',
-      JSON.stringify(this.semanticSearch.search(`${task} ${step}`, 8).map(r => ({
-        path: r.path,
-        score: Number(r.score.toFixed(3)),
-        symbols: r.symbols.slice(0, 8)
-      })), null, 2),
       '',
       'OVERALL TASK:',
       task,
@@ -254,7 +266,7 @@ class EnhancedOrchestrator {
       `CURRENT STEP (${index + 1}/${totalSteps}):`,
       step,
       '',
-      'If you identify a bug during research, fix it immediately even if not explicitly in the step.',
+      'If you identify a bug during implementation, fix it immediately.',
       'Be thorough. If you fail to fix an issue in 3 attempts, backtrack and re-evaluate your strategy.'
     ].join('\n');
 
@@ -372,7 +384,7 @@ class EnhancedOrchestrator {
       'Output ONLY the markdown content for PROPOSAL.md.'
     ].join('\n');
     await this.gateway.createSession();
-    const proposal = await this.gateway.chat(prompt);
+    const proposal = await this.gateway.chat(prompt, 'planner', 'R1');
     await this.gateway.closeSession();
     return proposal;
   }

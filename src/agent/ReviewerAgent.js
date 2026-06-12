@@ -27,7 +27,7 @@ class ReviewerAgent {
       baseContext
     ].join('\n');
 
-    const response = await this.gateway.chat(prompt);
+    const response = await this.gateway.chat(prompt, 'reviewer', 'R1');
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return { passed: false, findings: ['Reviewer returned invalid JSON'] };
     try {

@@ -19,23 +19,24 @@ class GatewayClient {
     }
   }
 
-  async chat(prompt) {
+  async chat(prompt, tab, model) {
     if (!this.sessionId) throw new Error('No active session. Call createSession() first.');
 
     const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let i = 0;
     const interval = setInterval(() => {
-      process.stdout.write(`\r${frames[i++ % frames.length]} Thinking...`);
+      const label = tab ? `Thinking (${tab})...` : 'Thinking...';
+      process.stdout.write(`\r${frames[i++ % frames.length]} ${label}`);
     }, 80);
 
     try {
       const res = await fetch(this.baseUrl + '/session/' + this.sessionId + '/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt })
+        body: JSON.stringify({ prompt, tab, model })
       });
       clearInterval(interval);
-      process.stdout.write('\r' + ' '.repeat(20) + '\r');
+      process.stdout.write('\r' + ' '.repeat(40) + '\r');
       if (!res.ok) {
         const error = await res.text();
         throw new Error('Gateway error ' + res.status + ': ' + error);
@@ -44,7 +45,7 @@ class GatewayClient {
       return data.text;
     } catch (err) {
       clearInterval(interval);
-      process.stdout.write('\r' + ' '.repeat(20) + '\r');
+      process.stdout.write('\r' + ' '.repeat(40) + '\r');
       throw err;
     }
   }
