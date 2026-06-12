@@ -82,50 +82,54 @@ class EnhancedOrchestrator {
     // FEATURE 2: Strategic Intent (Topic Model)
     this._updateTopic('Initializing', `Starting task: ${task}`);
 
-    if (pendingTaskId) {
-      this._updateTopic('Resuming', `Continuing previously interrupted task: ${pendingTaskId}`);
-      logger.info(`Resuming task: ${pendingTaskId}`);
-      this.taskManager = new TaskManager(this.projectPath, pendingTaskId);
-      plan = { steps: this.taskManager.state.steps.map(s => s.description) };
-    } else {
-      this._updateTopic('Planning', 'Generating strategic execution plan and semantic mapping');
-      plan = await this.plannerAgent.plan(task);
-      if (plan.quickAnswer) return this._quickAnswer();
-
-      this.taskManager = new TaskManager(this.projectPath);
-      this.taskManager.setPlan(plan.steps);
-    }
-
-    // FEATURE 5: Plan Mode (Speculative Design)
-    if (options.planOnly || options.speculate) {
-      this._updateTopic('Speculating', 'Drafting architectural proposal before execution');
-      const proposal = await this._generateProposal(task, plan);
-      const proposalPath = path.join(this.projectPath, 'PROPOSAL.md');
-      fs.writeFileSync(proposalPath, proposal);
-      logger.success(`Proposal written to ${proposalPath}`);
-      return proposal;
-    }
-
-    this.journal = new ExecutionJournal(this.projectPath, this.taskManager.taskId);
-    this.checkpoints = new CheckpointManager(this.projectPath, this.taskManager.taskId);
-    this.validatorAgent = new ValidatorAgent(this.validator, this.metrics, this.journal, this.traceLogger);
-    this.repairAgent = new RepairAgent(this.gateway, this.validatorAgent, { journal: this.journal, checkpoints: this.checkpoints, errorMemory: this.errorMemory });
-    this.reviewerAgent = new ReviewerAgent(this.gateway, this.semanticSearch);
-    this.journal.record('task-start', { task, plan: plan.steps });
-    this.journal.record('confidence-evidence', this._confidenceEvidence(plan));
-    if (plan.relatedFiles) this.journal.record('semantic-context', { relatedFiles: plan.relatedFiles });
-
-    logger.header(pendingTaskId ? 'Resuming Execution Plan' : 'Execution Plan');
-    plan.steps.forEach((s, i) => {
-      const status = this.taskManager.state.steps[i]?.status || 'pending';
-      console.log(`  ${i + 1}. [${status}] ${s}`);
-    });
-
     await this.gateway.createSession();
-    let finalResult = '';
     const startTime = Date.now();
 
     try {
+      if (pendingTaskId) {
+        this._updateTopic('Resuming', `Continuing previously interrupted task: ${pendingTaskId}`);
+        logger.info(`Resuming task: ${pendingTaskId}`);
+        this.taskManager = new TaskManager(this.projectPath, pendingTaskId);
+        plan = { steps: this.taskManager.state.steps.map(s => s.description) };
+      } else {
+        this._updateTopic('Planning', 'Generating strategic execution plan and semantic mapping');
+        plan = await this.plannerAgent.plan(task);
+        if (plan.quickAnswer) {
+          const answer = this._quickAnswer();
+          await this.gateway.closeSession();
+          return answer;
+        }
+
+        this.taskManager = new TaskManager(this.projectPath);
+        this.taskManager.setPlan(plan.steps);
+      }
+
+      // FEATURE 5: Plan Mode (Speculative Design)
+      if (options.planOnly || options.speculate) {
+        this._updateTopic('Speculating', 'Drafting architectural proposal before execution');
+        const proposal = await this._generateProposal(task, plan);
+        const proposalPath = path.join(this.projectPath, 'PROPOSAL.md');
+        fs.writeFileSync(proposalPath, proposal);
+        logger.success(`Proposal written to ${proposalPath}`);
+        return proposal;
+      }
+
+      this.journal = new ExecutionJournal(this.projectPath, this.taskManager.taskId);
+      this.checkpoints = new CheckpointManager(this.projectPath, this.taskManager.taskId);
+      this.validatorAgent = new ValidatorAgent(this.validator, this.metrics, this.journal, this.traceLogger);
+      this.repairAgent = new RepairAgent(this.gateway, this.validatorAgent, { journal: this.journal, checkpoints: this.checkpoints, errorMemory: this.errorMemory });
+      this.reviewerAgent = new ReviewerAgent(this.gateway, this.semanticSearch);
+      this.journal.record('task-start', { task, plan: plan.steps });
+      this.journal.record('confidence-evidence', this._confidenceEvidence(plan));
+      if (plan.relatedFiles) this.journal.record('semantic-context', { relatedFiles: plan.relatedFiles });
+
+      logger.header(pendingTaskId ? 'Resuming Execution Plan' : 'Execution Plan');
+      plan.steps.forEach((s, i) => {
+        const status = this.taskManager.state.steps[i]?.status || 'pending';
+        console.log(`  ${i + 1}. [${status}] ${s}`);
+      });
+
+      let finalResult = '';
       for (let i = this.taskManager.state.currentStepIndex; i < plan.steps.length; i++) {
         this._updateTopic(`Step ${i+1}/${plan.steps.length}`, plan.steps[i]);
         try {
