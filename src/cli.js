@@ -30,6 +30,7 @@ program
   .description('Execute a task using the AI orchestrator')
   .option('--port <number>', 'Port for runtime health validation')
   .option('--start-command <command>', 'Command to start the server for health check')
+  .option('--read-only', 'Inspect/analyze only — block all file writes and shell commands')
   .action(async (project, task, options) => {
     if (!task) { console.error('Error: task argument required'); process.exit(1); }
     if (options.port) options.port = parseInt(options.port, 10);

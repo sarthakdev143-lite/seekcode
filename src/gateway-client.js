@@ -7,7 +7,11 @@ class GatewayClient {
     this.baseUrl = config.GATEWAY_URL;
     this.sessionId = null;
     this.projectPath = projectPath || null;
+    this.readOnly = false;
   }
+
+  /** Activate read-only mode for all subsequent chat() calls */
+  setReadOnly(val) { this.readOnly = Boolean(val); }
 
   async createSession() {
     const body = {};
@@ -26,10 +30,12 @@ class GatewayClient {
     }
   }
 
-  async chat(prompt, tab, model) {
+  async chat(prompt, tab, model, readOnly) {
     if (!this.sessionId) throw new Error('No active session. Call createSession() first.');
+    // Use argument override if provided, else fall back to instance default
+    const effectiveReadOnly = readOnly !== undefined ? readOnly : this.readOnly;
 
-    const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    const frames = ['\u280b', '\u2819', '\u2839', '\u2838', '\u283c', '\u2834', '\u2826', '\u2827', '\u2807', '\u280f'];
     let i = 0;
     const interval = setInterval(() => {
       const label = tab ? `Thinking (${tab})...` : 'Thinking...';
@@ -40,7 +46,7 @@ class GatewayClient {
       const res = await fetch(this.baseUrl + '/session/' + this.sessionId + '/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, tab, model })
+        body: JSON.stringify({ prompt, tab, model, readOnly: effectiveReadOnly })
       });
       clearInterval(interval);
       process.stdout.write('\r' + ' '.repeat(40) + '\r');

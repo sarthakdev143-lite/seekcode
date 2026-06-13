@@ -133,6 +133,14 @@ class EnhancedOrchestrator {
     await this.gateway.createSession();
     const startTime = Date.now();
 
+    // Apply read-only mode on gateway client (propagates to all chat calls)
+    if (options.readOnly) {
+      this.gateway.setReadOnly(true);
+      logger.warn('⛔ Read-only mode — no filesystem writes or commands will be executed.');
+    } else {
+      this.gateway.setReadOnly(false);
+    }
+
     try {
       if (pendingTaskId) {
         this._updateTopic('Resuming', `Continuing previously interrupted task: ${pendingTaskId}`);
