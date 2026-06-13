@@ -2,12 +2,12 @@ const path = require('path');
 const logger = require('../logger');
 const { EnhancedOrchestrator } = require('../orchestrator/EnhancedOrchestrator');
 
-async function runCommand(projectPath, task) {
+async function runCommand(projectPath, task, options = {}) {
   const absPath = path.resolve(projectPath || process.cwd());
   logger.header('SeekCode - Task Execution');
   const orchestrator = new EnhancedOrchestrator(absPath);
   await orchestrator.init();
-  const result = await orchestrator.run(task);
+  const result = await orchestrator.run(task, options);
   
   logger.divider();
   console.log(logger.renderMarkdown(result));

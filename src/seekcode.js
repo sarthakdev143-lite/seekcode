@@ -128,13 +128,16 @@ program
   .command('run [project] [task]')
   .description('Execute a task (auto-starts gateway)')
   .option('--trace', 'Enable detailed tracing (ON by default)')
+  .option('--port <number>', 'Port for runtime health validation')
+  .option('--start-command <command>', 'Command to start the server for health check')
   .action(async (project, task, options) => {
     if (!task) { console.error('Task required'); process.exit(1); }
     
     const gatewayReady = await startGatewayIfNeeded();
     if (!gatewayReady) process.exit(1);
     try {
-      await runCommand(project, task);
+      if (options.port) options.port = parseInt(options.port, 10);
+      await runCommand(project, task, options);
     } finally {
       // Keep gateway running for subsequent commands, or stop? 
     }
@@ -163,9 +166,10 @@ program
 
 // If no subcommand is provided, enter interactive mode
 const args = process.argv.slice(2);
-const isCommand = args.length > 0 && !args[0].startsWith('-');
+const isHelp = args.includes('--help') || args.includes('-h');
+const isCommand = args.length > 0 && !args[0].startsWith('-') && !isHelp;
 
-if (!isCommand) {
+if (!isCommand && !isHelp) {
   (async () => {
     // Manually parse options to avoid commander showing help for "missing command"
     program.parseOptions(args);

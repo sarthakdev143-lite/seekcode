@@ -27,6 +27,10 @@ const { ReviewerAgent } = require('../agent/ReviewerAgent');
 const logger = require('../logger');
 const { ErrorMemory } = require('../recovery/ErrorMemory');
 const { SelfHealingOrchestrator } = require('../self-healing');
+// Cross-session persistent memory
+const { ProjectMemory } = require('../session/ProjectMemory');
+const { WorkLog } = require('../session/WorkLog');
+const { SituationReport } = require('../session/SituationReport');
 
 let TraceLogger = null;
 try { TraceLogger = require('../trace-logger').TraceLogger; } catch {}
@@ -38,14 +42,18 @@ class EnhancedOrchestrator {
     this.session = new SessionMemory();
     this.executionLog = [];
     this.traceLogger = null;
+    this.situationReport = null;
+    this._sessionId = `orch_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+    // Persistent cross-session memory — initialized immediately
+    this.projectMemory = new ProjectMemory(this.projectPath);
+    this.workLog = new WorkLog(this.projectPath);
+    this._situationReporter = new SituationReport(this.projectPath);
 
     // Always enable tracing — no env var gate.
-    // Logs go to <projectPath>/.seekcode/traces/ and ~/.seekcode/logs/
     if (TraceLogger) {
-      const sessionId = `orch_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-      this.traceLogger = new TraceLogger(sessionId, this.projectPath);
+      this.traceLogger = new TraceLogger(this._sessionId, this.projectPath);
       this.traceLogger.logEvent('orchestrator_init', { projectPath: this.projectPath });
-      // Print log path so the user knows where to look
       const logPath = this.traceLogger.projectLogPath;
       if (logPath) {
         logger.info(`📝 Trace log: ${logPath}`);
@@ -79,10 +87,21 @@ class EnhancedOrchestrator {
     this.researchAgent = new ResearchAgent(this.gateway);
     this.executorAgent = new ExecutorAgent(this.gateway);
 
+    // Generate situation report from all prior sessions
+    this.situationReport = this._situationReporter.generate();
+    if (this.situationReport) {
+      logger.warn('📋 Prior session history found — injecting situation report into all prompts.');
+      this._log('situation_report_loaded', { hasReport: true });
+    }
+
     logger.success('Enhanced orchestrator initialized');
   }
 
   async run(task, options = {}) {
+    this.options = options;
+    if (options.port) {
+      this.projectMemory.setKnownPort(options.port);
+    }
     this.executionLog = [];
     const explicitTaskId = process.env.SEEKCODE_TASK_ID || null;
     const pendingTaskId = TaskManager.findPendingTask(this.projectPath, explicitTaskId);
@@ -93,6 +112,8 @@ class EnhancedOrchestrator {
     this._log('run_start', { task, options, pendingTaskId });
     this._createGitCheckpoint(task, 'pre-task');
     this._updateTopic('Initializing', `Starting task: ${task}`);
+    // Record session start in persistent memory
+    this.projectMemory.startSession(this._sessionId, task);
 
     await this.gateway.createSession();
     const startTime = Date.now();
@@ -133,7 +154,12 @@ class EnhancedOrchestrator {
       this.journal = new ExecutionJournal(this.projectPath, this.taskManager.taskId);
       this.checkpoints = new CheckpointManager(this.projectPath, this.taskManager.taskId);
       this.validatorAgent = new ValidatorAgent(this.validator, this.metrics, this.journal, this.traceLogger);
-      this.repairAgent = new RepairAgent(this.gateway, this.validatorAgent, { journal: this.journal, checkpoints: this.checkpoints, errorMemory: this.errorMemory });
+      this.repairAgent = new RepairAgent(this.gateway, this.validatorAgent, {
+        journal: this.journal,
+        checkpoints: this.checkpoints,
+        errorMemory: this.errorMemory,
+        projectMemory: this.projectMemory,  // NEW: cross-session memory
+      });
       this.reviewerAgent = new ReviewerAgent(this.gateway, this.semanticSearch);
       this.journal.record('task-start', { task, plan: plan.steps });
       this.journal.record('confidence-evidence', this._confidenceEvidence(plan));
@@ -172,8 +198,10 @@ class EnhancedOrchestrator {
       }
 
       logger.header('Final Validation');
-      let finalValidation = await this.validatorAgent.validate({ source: 'final' });
+      let finalValidation = await this.validatorAgent.validate(this._getValidationOptions({ source: 'final' }));
       this._log('validation_final', { success: finalValidation.success, phase: finalValidation.phase, error: finalValidation.error });
+      // Persist validation result for future sessions
+      this.projectMemory.recordValidation(finalValidation.success, finalValidation.phase, finalValidation.error);
 
       if (!finalValidation.success) {
         logger.warn('Final validation failed. Attempting autonomous repair...');
@@ -181,16 +209,36 @@ class EnhancedOrchestrator {
         const repairSucceeded = await this.repairAgent.repair(finalValidation, 'Final completion', baseContext);
         this._log('repair_end', { trigger: 'final_validation', success: repairSucceeded });
         if (repairSucceeded) {
-          finalValidation = await this.validatorAgent.validate({ source: 'final-after-repair' });
+          finalValidation = await this.validatorAgent.validate(this._getValidationOptions({ source: 'final-after-repair' }));
           this._log('validation_after_repair', { success: finalValidation.success });
+          this.projectMemory.recordValidation(finalValidation.success, finalValidation.phase, finalValidation.error);
         } else {
-          logger.warn('Autonomous repair failed. Triggering re-planning for remaining issues.');
+          // FIX: Previously these new steps were appended to plan.steps AFTER the for-loop
+          // had already exited, so they were NEVER executed. We now execute them inline.
+          logger.warn('Autonomous repair failed. Triggering re-planning and executing fix steps...');
           const rePlanTask = `The implementation is almost complete but final validation failed: ${finalValidation.error}. Please fix the remaining issues for the task: ${task}`;
           const finalFixPlan = await this.plannerAgent.plan(rePlanTask);
           this._log('replan_after_repair', { steps: finalFixPlan.steps });
           if (finalFixPlan.steps && finalFixPlan.steps.length > 0) {
-            plan.steps.push(...finalFixPlan.steps);
-            this.taskManager.setPlan(plan.steps);
+            // Execute the re-planned steps immediately (was dead code before)
+            for (let fi = 0; fi < finalFixPlan.steps.length; fi++) {
+              try {
+                const fixResult = await this._executeStep(
+                  plan.steps.length + fi,
+                  finalFixPlan.steps[fi],
+                  plan.steps.length + finalFixPlan.steps.length,
+                  task,
+                  baseContext
+                );
+                finalResult += fixResult;
+              } catch (fixErr) {
+                logger.warn(`Fix step ${fi + 1} failed: ${fixErr.message}`);
+                this._log('fix_step_error', { step: finalFixPlan.steps[fi], error: fixErr.message });
+              }
+            }
+            // Re-validate after executing fix steps
+            finalValidation = await this.validatorAgent.validate(this._getValidationOptions({ source: 'final-after-replan' }));
+            this.projectMemory.recordValidation(finalValidation.success, finalValidation.phase, finalValidation.error);
           }
         }
       }
@@ -232,6 +280,21 @@ class EnhancedOrchestrator {
       this._createGitCheckpoint(task, 'post-task');
       this.session.rememberTask(task, finalResult.substring(0, 500));
       const totalDurationMs = Date.now() - runStart;
+      const taskOutcome = this.taskManager.state.status === 'completed' && finalValidation.success && review.passed;
+
+      // Persist outcomes to cross-session memory
+      const changedFilesAll = this.executionLog.flatMap(e => e.changedFiles || []);
+      this.projectMemory.recordFileChanges(changedFilesAll);
+      this.projectMemory.endSession(this._sessionId, taskOutcome ? 'success' : finalValidation.success ? 'partial' : 'failed');
+      this.workLog.record({
+        type: 'session_end',
+        task,
+        result: finalResult.substring(0, 400),
+        success: taskOutcome,
+        filesChanged: [...new Set(changedFilesAll)],
+        durationMs: totalDurationMs,
+      });
+
       this._log('run_complete', {
         totalDurationMs,
         validationPassed: finalValidation.success,
@@ -239,7 +302,7 @@ class EnhancedOrchestrator {
         stepsCompleted: this.taskManager.state.steps.filter(s => s.status === 'completed').length,
         totalSteps: plan.steps.length,
       });
-      this.metrics.recordTask(this.taskManager.state.status === 'completed' && finalValidation.success && review.passed, Date.now() - startTime);
+      this.metrics.recordTask(taskOutcome, Date.now() - startTime);
       return finalResult;
     } catch (err) {
       this._log('run_error', { error: err.message, stack: err.stack?.slice(0, 500) });
@@ -324,7 +387,7 @@ class EnhancedOrchestrator {
       this.journal.record('step-complete', { index: index + 1, durationMs, changedFiles, result: result.substring(0, 1000) });
 
       if (changedFiles.length > 0 || this._resultMentionsToolMutation(result)) {
-        const validation = await this.validatorAgent.validate({ source: 'step', index: index + 1, changedFiles });
+        const validation = await this.validatorAgent.validate(this._getValidationOptions({ source: 'step', index: index + 1, changedFiles }));
 
         if (!validation.success) {
           const repaired = await this.repairAgent.repair(validation, step, baseContext);
@@ -363,7 +426,7 @@ class EnhancedOrchestrator {
   }
 
   _baseContext() {
-    return JSON.stringify({
+    const ctx = JSON.stringify({
       project: this.analyzer.getSummary(),
       dependencyGraph: this.analyzer.getDependencyGraph().toJSON(),
       recentTasks: this.session.getRecentTasks(),
@@ -372,6 +435,20 @@ class EnhancedOrchestrator {
         files: Object.keys(this.repositoryMap?.map?.files || {}).length
       }
     }, null, 2);
+    // Prepend situation report from prior sessions (if any)
+    if (this.situationReport) {
+      return this.situationReport + '\n\nPROJECT CONTEXT:\n' + ctx;
+    }
+    return ctx;
+  }
+
+  _getValidationOptions(extra = {}) {
+    const valOpts = { ...extra };
+    const port = this.options?.port || this.projectMemory.getLastKnownPort();
+    if (port) valOpts.port = port;
+    const startCmd = this.options?.startCommand || this.validator.startCommand;
+    if (startCmd) valOpts.startCommand = startCmd;
+    return valOpts;
   }
 
   _quickAnswer() {

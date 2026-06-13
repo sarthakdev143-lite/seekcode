@@ -4,14 +4,24 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const logger = require('../logger');
+const { sanitizeCommand } = require('../utils/platformCommands');
+const { ProcessManager } = require('./ProcessManager');
 
 class ValidationEngine {
   constructor(projectDir, options = {}) {
     this.projectDir = projectDir;
     this.buildCommand = options.buildCommand || this._detectBuildCommand();
     this.testCommand = options.testCommand || this._detectTestCommand();
+    this.startCommand = options.startCommand || this._detectStartCommand();
     this.timeoutMs = options.timeoutMs || 300_000;
     this.active = new Set();
+  }
+
+  _detectStartCommand() {
+    const pkg = this._readPackage();
+    if (pkg?.scripts?.start) return 'npm start';
+    if (pkg?.scripts?.dev) return 'npm run dev';
+    return null;
   }
 
   _detectBuildCommand() {
@@ -48,9 +58,11 @@ class ValidationEngine {
     const timeoutMs = options.timeoutMs || this.timeoutMs;
     const controller = options.controller;
     const quiet = Boolean(options.quiet);
+    // Fix Windows-incompatible commands (e.g. `timeout /t 5 >nul`)
+    const safeCommand = sanitizeCommand(command);
 
     return new Promise((resolve) => {
-      const child = spawn(command, {
+      const child = spawn(safeCommand, {
         cwd: this.projectDir,
         shell: true,
         windowsHide: true,
@@ -154,7 +166,85 @@ class ValidationEngine {
       return { success: false, phase: 'test', output: testResult.output, error: testResult.error, runs };
     }
 
+    // Run runtime validation if port is specified
+    const port = options.port;
+    const startCmd = options.startCommand || this.startCommand;
+    if (port && startCmd) {
+      const runtimeResult = await this.validateRuntime(startCmd, {
+        port,
+        healthPath: options.healthPath || '/',
+        readyMs: options.readyMs || 30000,
+        cwd: options.cwd,
+      });
+      runs.push(runtimeResult);
+      if (!runtimeResult.success) {
+        return { success: false, phase: 'runtime', output: runtimeResult.output, error: runtimeResult.error, runs };
+      }
+    }
+
     return { success: true, runs };
+  }
+
+  /**
+   * Runtime validation — start a server and verify it responds on the given port.
+   * This catches errors that build/test miss (e.g. missing .env, fabric not installed,
+   * wrong port config, startup crash after compilation succeeds).
+   *
+   * @param {string} startCommand  Command to start the server (e.g. 'npm run dev')
+   * @param {object} opts
+   * @param {number}  opts.port          Port to health-check (required)
+   * @param {string}  [opts.healthPath='/'] HTTP path to check
+   * @param {number}  [opts.readyMs=30000]  How long to wait for the server (ms)
+   * @param {string}  [opts.cwd]           Working directory (default: projectDir)
+   * @param {string}  [opts.name='runtime-check'] Process name label
+   * @returns {Promise<{success: boolean, phase: string, output?: string, error?: string, status?: number}>}
+   */
+  async validateRuntime(startCommand, opts = {}) {
+    const { port, healthPath = '/', readyMs = 30_000, cwd, name = 'runtime-check' } = opts;
+    if (!port) {
+      return { success: false, phase: 'runtime', error: 'validateRuntime requires a port number' };
+    }
+
+    logger.info(`Runtime validation: starting '${startCommand}' on port ${port}...`);
+    const pm = new ProcessManager(cwd || this.projectDir);
+
+    try {
+      const startResult = await pm.start(name, startCommand, {
+        cwd: cwd || this.projectDir,
+        port,
+        readyMs,
+      });
+
+      if (!startResult.started) {
+        return {
+          success: false,
+          phase: 'runtime',
+          error: startResult.error || 'Server failed to start',
+          output: pm.getOutput(name)?.stderr || '',
+        };
+      }
+
+      // Do a more thorough HTTP check at the health path
+      const check = await ProcessManager.httpCheck(port, healthPath, 5000);
+      const output = pm.getOutput(name);
+
+      if (check.ok) {
+        logger.success(`Runtime validation passed: HTTP ${check.status} at localhost:${port}${healthPath}`);
+        return { success: true, phase: 'runtime', status: check.status };
+      } else {
+        const errDetail = check.error || `HTTP ${check.status} — server responded but with error`;
+        logger.warn(`Runtime validation failed: ${errDetail}`);
+        return {
+          success: false,
+          phase: 'runtime',
+          error: errDetail,
+          output: (output?.stdout || '') + '\n' + (output?.stderr || ''),
+        };
+      }
+    } finally {
+      // Always stop the test server
+      await pm.stop(name).catch(() => {});
+    }
   }
 }
 

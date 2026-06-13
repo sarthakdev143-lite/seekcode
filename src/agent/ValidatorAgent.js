@@ -8,10 +8,10 @@ class ValidatorAgent {
     this.traceLogger = traceLogger;
   }
 
-  async validate(context = {}) {
-    const result = await this.validator.validate();
+  async validate(options = {}) {
+    const result = await this.validator.validate(options);
     if (this.metrics) this.metrics.recordValidation(result);
-    if (this.journal) this.journal.record('validation', { ...context, success: result.success, phase: result.phase, error: result.error });
+    if (this.journal) this.journal.record('validation', { ...options, success: result.success, phase: result.phase, error: result.error });
     
     if (this.traceLogger) {
       this.traceLogger._write({

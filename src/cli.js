@@ -28,9 +28,12 @@ program
 program
   .command('run [project] [task]')
   .description('Execute a task using the AI orchestrator')
-  .action(async (project, task) => {
+  .option('--port <number>', 'Port for runtime health validation')
+  .option('--start-command <command>', 'Command to start the server for health check')
+  .action(async (project, task, options) => {
     if (!task) { console.error('Error: task argument required'); process.exit(1); }
-    await runCommand(project, task);
+    if (options.port) options.port = parseInt(options.port, 10);
+    await runCommand(project, task, options);
   });
 
 program

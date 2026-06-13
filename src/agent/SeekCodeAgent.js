@@ -7,6 +7,11 @@ const { SecuritySandbox } = require('../security/SecuritySandbox');
 const config = require('../config');
 const logger = require('../logger');
 
+// Cross-session persistent memory
+const { ProjectMemory } = require('../session/ProjectMemory');
+const { WorkLog } = require('../session/WorkLog');
+const { SituationReport } = require('../session/SituationReport');
+
 let TraceLogger = null;
 try { TraceLogger = require('../trace-logger').TraceLogger; } catch { }
 
@@ -25,9 +30,16 @@ class SeekCodeAgent {
       docker: { image: config.DOCKER_IMAGE || 'node:20-alpine', network: config.ALLOW_NETWORK ? 'bridge' : 'none' }
     });
     this.traceLogger = null;
+    
+    // Initialize persistent cross-session memory
+    this.projectMemory = new ProjectMemory(this.projectPath);
+    this.workLog = new WorkLog(this.projectPath);
+    this._situationReporter = new SituationReport(this.projectPath);
+    this.situationReport = null;
+    this._sessionId = `agent_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
     if (process.env.SEEKCODE_TRACE === '1' && TraceLogger) {
-      const sessionId = `agent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      this.traceLogger = new TraceLogger(sessionId, this.projectPath);
+      this.traceLogger = new TraceLogger(this._sessionId, this.projectPath);
       this.traceLogger.logEvent('agent_init', { projectPath: this.projectPath });
     }
   }
@@ -36,6 +48,15 @@ class SeekCodeAgent {
     this.analyzer = new ProjectAnalyzer(this.projectPath);
     await this.analyzer.analyze();
     await this.gateway.createSession();
+
+    // Start session in project memory
+    this.projectMemory.startSession(this._sessionId, 'Interactive CLI Session');
+    // Generate situation report from prior sessions
+    this.situationReport = this._situationReporter.generate();
+    if (this.situationReport) {
+      logger.warn('📋 Prior session history found — injecting situation report into all prompts.');
+    }
+
     logger.success('Agent ready. Project: ' + this.analyzer.getSummary().project);
     logger.info(`Context window: ${this.contextManager.maxContextTokens / 1000}k tokens`);
     logger.info(`Sandbox: ${this.sandbox.docker._dockerAvailable ? 'Docker enabled' : 'Host mode (unsandboxed)'}`);
@@ -60,7 +81,7 @@ class SeekCodeAgent {
   async handle(input) {
     const intent = classify(input, this.analyzer.getSummary());
     this._currentIntent = intent;
-    const agenticBase = [
+    let agenticBase = [
       'You are SeekCode, a senior autonomous software engineer.',
       'CORE DIRECTIVES:',
       '- RESEARCH FIRST: Never edit a file without reading it and its dependencies first.',
@@ -69,6 +90,10 @@ class SeekCodeAgent {
       '- NO HACKS: Do not suppress warnings or use `any` types. Fix the root cause.',
       '- IDIOMATIC: Match the existing project style, naming, and architecture.'
     ].join('\n');
+
+    if (this.situationReport) {
+      agenticBase = this.situationReport + '\n\n' + agenticBase;
+    }
 
     switch (intent) {
       case INTENTS.GREETING: return await this._handleGreeting(input);
@@ -193,6 +218,11 @@ class SeekCodeAgent {
     try { await this.gateway.closeSession(); } catch { }
     await this.sandbox.cleanup();
     if (this.traceLogger) this.traceLogger.close();
+    try {
+      this.projectMemory.endSession(this._sessionId, 'success');
+    } catch (err) {
+      // ignore
+    }
   }
 }
 
