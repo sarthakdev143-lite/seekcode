@@ -8,12 +8,12 @@ const path = require('path');
 
 async function interactiveMode(projectPath) {
   const agent = new SeekCodeAgent(projectPath);
-  
+
   // Banner
   console.log('\n' + chalk.cyan.bold(' ╔════════════════════════════════════════════╗'));
   console.log(chalk.cyan.bold(' ║') + chalk.white.bold('           SeekCode Agentic CLI           ') + chalk.cyan.bold('║'));
   console.log(chalk.cyan.bold(' ╚════════════════════════════════════════════╝'));
-  
+
   const spinner = ora('Agent initializing...').start();
   try {
     await agent.init();
@@ -86,7 +86,7 @@ async function interactiveMode(projectPath) {
     try {
       input = await getTask();
     } catch (err) {
-      break; 
+      break;
     }
 
     if (!input) continue;
@@ -120,14 +120,14 @@ async function interactiveMode(projectPath) {
     try {
       const response = await agent.handle(finalInput);
       stepSpinner.stop();
-      
+
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      
+
       logger.divider();
       console.log(logger.renderMarkdown(response));
       logger.divider();
       console.log(chalk.dim(`Completed in ${elapsed}s\n`));
-      
+
     } catch (err) {
       stepSpinner.fail('Task failed');
       logger.error(err.message);

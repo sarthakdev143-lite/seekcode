@@ -41,6 +41,20 @@ class CommandRiskAnalyzer {
 
   analyze(command) {
     const lower = command.toLowerCase().trim();
+    
+    // Prevent agent suicide commands (terminating node.exe / node globally)
+    const suicidePatterns = [
+      /taskkill.*\bnode(\.exe)?\b/i,
+      /\b(killall|pkill|pkill\.exe|kill)\b.*\bnode(\.exe)?\b/i,
+    ];
+    if (suicidePatterns.some(regex => regex.test(command))) {
+      return {
+        level: 'critical',
+        reason: 'Suicide Command: Attempt to kill Node.js processes globally. This would terminate the SeekCode agent and gateway.',
+        requiresApproval: true
+      };
+    }
+
     for (const pattern of this.policy.forbiddenCommands) {
       if (lower.includes(pattern.toLowerCase())) {
         return { level: 'critical', reason: `Forbidden pattern: "${pattern}"`, requiresApproval: true };
