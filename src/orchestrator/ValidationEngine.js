@@ -14,7 +14,10 @@ class ValidationEngine {
     this.testCommand = options.testCommand || this._detectTestCommand();
     this.startCommand = options.startCommand || this._detectStartCommand();
     this.timeoutMs = options.timeoutMs || 300_000;
+    this.maxRetries = options.maxRetries !== undefined ? options.maxRetries : 2;  // retry up to 2 extra times
+    this.retryBaseDelayMs = options.retryBaseDelayMs || 3_000;
     this.active = new Set();
+    this._pkgCache = null; // cache for package.json
   }
 
   _detectStartCommand() {
@@ -43,11 +46,45 @@ class ValidationEngine {
   }
 
   _readPackage() {
+    if (this._pkgCache !== null) return this._pkgCache;
     try {
       const pkgPath = path.join(this.projectDir, 'package.json');
-      if (fs.existsSync(pkgPath)) return JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      if (fs.existsSync(pkgPath)) {
+        this._pkgCache = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        return this._pkgCache;
+      }
     } catch {}
+    this._pkgCache = null; // mark as "tried and failed"
     return null;
+  }
+
+  /**
+   * Invalidate the package.json cache (call after npm install / package changes).
+   */
+  invalidatePkgCache() {
+    this._pkgCache = null;
+  }
+
+  /**
+   * Run a function up to (1 + maxRetries) times with exponential backoff.
+   * Only retries if the result has success===false and timedOut===false.
+   */
+  async runWithRetry(fn, label, maxRetries = this.maxRetries, baseDelayMs = this.retryBaseDelayMs) {
+    let attempt = 0;
+    while (true) {
+      const result = await fn();
+      if (result.success || result.skipped) return result;
+      if (result.timedOut) {
+        logger.warn(`${label} timed out — not retrying`);
+        return result;
+      }
+      if (attempt >= maxRetries) return result;
+      attempt++;
+      const delay = baseDelayMs * Math.pow(2, attempt - 1); // 3s, 6s, 12s ...
+      logger.warn(`${label} failed (attempt ${attempt}/${maxRetries + 1}) — retrying in ${(delay / 1000).toFixed(1)}s...`);
+      logger.warn(`  Error: ${(result.error || '').slice(0, 200)}`);
+      await new Promise(r => setTimeout(r, delay));
+    }
   }
 
   cancelAll(signal = 'SIGTERM') {
@@ -132,13 +169,21 @@ class ValidationEngine {
   async runBuild(options = {}) {
     if (!this.buildCommand) return { success: true, skipped: true, phase: 'build', message: 'No build command detected' };
     logger.info('Validating build: ' + this.buildCommand);
-    return { phase: 'build', ...(await this.runCommand(this.buildCommand, options)) };
+    return this.runWithRetry(
+      () => this.runCommand(this.buildCommand, options).then(r => ({ phase: 'build', ...r })),
+      'Build',
+      options.maxRetries !== undefined ? options.maxRetries : this.maxRetries,
+    );
   }
 
   async runTests(options = {}) {
     if (!this.testCommand) return { success: true, skipped: true, phase: 'test', message: 'No test command detected' };
     logger.info('Validating tests: ' + this.testCommand);
-    return { phase: 'test', ...(await this.runCommand(this.testCommand, options)) };
+    return this.runWithRetry(
+      () => this.runCommand(this.testCommand, options).then(r => ({ phase: 'test', ...r })),
+      'Tests',
+      options.maxRetries !== undefined ? options.maxRetries : this.maxRetries,
+    );
   }
 
   _parseError(output) {

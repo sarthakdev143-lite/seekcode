@@ -67,6 +67,21 @@ class EnhancedOrchestrator {
     if (this.traceLogger) this.traceLogger.logEvent(event, data);
   }
 
+  /**
+   * Render a single-line ASCII progress bar to the console.
+   * e.g.  [█████░░░░░] 50%  Step 3/6: Write server routes
+   */
+  _renderProgressBar(current, total, label = '') {
+    const width  = Math.min(40, (process.stdout.columns || 80) - 30);
+    const pct    = total > 0 ? Math.round((current / total) * 100) : 0;
+    const filled = Math.round((pct / 100) * width);
+    const empty  = width - filled;
+    const bar    = '\x1b[32m' + '█'.repeat(filled) + '\x1b[90m' + '░'.repeat(empty) + '\x1b[0m';
+    const info   = `\x1b[1m${pct}%\x1b[0m  \x1b[36mStep ${current}/${total}\x1b[0m ${label.slice(0, 60)}`;
+    process.stdout.write(`\r\x1b[K  [${bar}] ${info}`);
+    if (current >= total) process.stdout.write('\n');
+  }
+
   async init() {
     this.analyzer = new ProjectAnalyzer(this.projectPath);
     await this.analyzer.analyze();
@@ -172,8 +187,10 @@ class EnhancedOrchestrator {
       });
 
       let finalResult = '';
+      const totalSteps = plan.steps.length;
       for (let i = this.taskManager.state.currentStepIndex; i < plan.steps.length; i++) {
         this._updateTopic(`Step ${i+1}/${plan.steps.length}`, plan.steps[i]);
+        this._renderProgressBar(i + 1, totalSteps, plan.steps[i]);
         try {
           const stepResult = await this._executeStep(i, plan.steps[i], plan.steps.length, task, baseContext);
           finalResult += stepResult;
