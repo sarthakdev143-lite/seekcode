@@ -22,9 +22,11 @@ class RepairAgent {
 
   async repair(validation, step, baseContext) {
     let currentValidation = validation;
+    let lastFingerprint = '';
 
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       const fingerprint = ErrorFingerprint.hash(currentValidation.error || currentValidation.output || '');
+      lastFingerprint = fingerprint;
       const attempts = (this.fingerprints.get(fingerprint) || 0) + 1;
       this.fingerprints.set(fingerprint, attempts);
 
@@ -108,13 +110,79 @@ class RepairAgent {
       }
     }
 
-    // All repair attempts failed — record the persistent failure
+    // All repair attempts failed — record the persistent failure in cross-session memory
     this.projectMemory?.markBroken(
       `${validation.phase} failure: ${(validation.error || '').slice(0, 100)}`,
       { attempts: this.maxRetries }
     );
 
-    return false;
+    // Escalate to human for interactive debugging / guidance / skip
+    while (true) {
+      const guidance = await this._escalateToHuman(currentValidation, step);
+      if (guidance.toLowerCase() === 'skip') {
+        logger.warn('Skipping validation failure on human instruction.');
+        return true; // pretend it succeeded so orchestrator continues
+      }
+      if (guidance.toLowerCase() === 'quit') {
+        logger.error('Execution aborted by user.');
+        process.exit(1);
+      }
+      
+      if (guidance) {
+        const guidancePrompt = [
+          'A validation check is still failing, and the human user provided the following direct feedback/guidance to help you fix it:',
+          '',
+          `USER FEEDBACK: "${guidance}"`,
+          '',
+          'PHASE FAILED: ' + currentValidation.phase,
+          'ERROR OUTPUT (read carefully):',
+          currentValidation.error || currentValidation.output || '(no error text)',
+          '',
+          'Please use this guidance and your tools to resolve the issue now. When done, verify your changes compile / build.',
+        ].join('\n');
+        
+        logger.info(`Running repair with human guidance...`);
+        await this.gateway.chat(guidancePrompt, 'repair', 'R1');
+        currentValidation = await this.validatorAgent.validate({ source: 'repair-guidance', fingerprint: lastFingerprint });
+        
+        if (currentValidation.success) {
+          if (lastFingerprint) this.projectMemory?.resolveError(lastFingerprint);
+          this.projectMemory?.markFixed(
+            `${validation.phase} failure: ${(validation.error || '').slice(0, 100)}`
+          );
+          this.journal?.record('repair-success', { guidance, source: 'human-escalation' });
+          return true;
+        }
+      }
+    }
+  }
+
+  async _escalateToHuman(validation, step) {
+    const readline = require('readline');
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+
+    console.log('\n' + '═'.repeat(60));
+    console.log('  ⚠️  REPAIR EXHAUSTED — HUMAN ESCALATION REQUIRED');
+    console.log('═'.repeat(60));
+    console.log(`Phase failed  : ${validation.phase}`);
+    console.log(`Error output  : ${validation.error || validation.output || '(no error text)'}`);
+    console.log(`Caused by step: ${step}`);
+    console.log('─'.repeat(60));
+    console.log('Please choose an action:');
+    console.log('  - Type a text hint/guidance to send to the agent for another retry');
+    console.log('  - Type "skip" to skip this step and proceed to the next step');
+    console.log('  - Type "quit" to abort and terminate execution');
+    console.log('═'.repeat(60));
+
+    return new Promise(resolve => {
+      rl.question('\nYour instruction/action: ', answer => {
+        rl.close();
+        resolve(answer.trim());
+      });
+    });
   }
 
   async repairReview(task, review, baseContext) {

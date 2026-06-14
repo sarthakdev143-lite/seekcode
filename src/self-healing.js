@@ -197,6 +197,46 @@ class SelfHealingOrchestrator {
     }
   }
 
+  async rollbackStep(originalState, changedFiles) {
+    try {
+      logger.warn('Rolling back changes for failed step...');
+      if (originalState?.backups && changedFiles && changedFiles.length > 0) {
+        const changedSet = new Set(changedFiles.map(f => path.resolve(this.projectPath, f)));
+        
+        // 1. Restore modified files
+        for (const [file, backup] of Object.entries(originalState.backups)) {
+          if (changedSet.has(path.resolve(file)) && fs.existsSync(backup)) {
+            await fs.promises.mkdir(path.dirname(file), { recursive: true });
+            await fs.promises.copyFile(backup, file);
+            logger.dim(`Restored: ${file}`);
+          }
+        }
+        
+        // 2. Delete newly created files
+        for (const file of changedFiles) {
+          const abs = path.resolve(this.projectPath, file);
+          const wasCreated = !originalState.backups[abs];
+          if (wasCreated && fs.existsSync(abs)) {
+            try {
+              const stat = fs.statSync(abs);
+              if (stat.isFile()) {
+                await fs.promises.unlink(abs);
+                logger.dim(`Deleted new file on rollback: ${abs}`);
+              }
+            } catch (err) {
+              logger.warn(`Failed to delete new file ${abs}: ${err.message}`);
+            }
+          }
+        }
+      }
+      logger.success('Step-specific rollback completed');
+      return true;
+    } catch (err) {
+      logger.error(`Step rollback failed: ${err.message}`);
+      return false;
+    }
+  }
+
   // ── Backup helpers ─────────────────────────────────────────────────────────
   async createBackup(files) {
     const backupDir = path.join(this.projectPath, '.seekcode', 'backups', Date.now().toString());

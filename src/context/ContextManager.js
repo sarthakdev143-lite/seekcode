@@ -7,6 +7,122 @@ const path = require('path');
 const crypto = require('crypto');
 const logger = require('../logger');
 
+let parseFile;
+try {
+  parseFile = require('../analyzer/parser').parseFile;
+} catch (e) {
+  // ignore
+}
+
+function extractFileOps(content) {
+  if (!content) return [];
+  const ops = [];
+  const lines = content.split('\n');
+  for (const line of lines) {
+    // write_file: ✓ Wrote 4.2 KB (120 lines) → src/api/auth.js
+    let m = line.match(/✓ Wrote .*? → (.*)$/);
+    if (m) {
+      ops.push({ type: 'write', path: m[1].trim() });
+      continue;
+    }
+    // write_files: ✓ src/api/auth.js: Written successfully (4.2 KB, 120 lines)
+    m = line.match(/✓ (.*?): Written successfully/);
+    if (m) {
+      ops.push({ type: 'write', path: m[1].trim() });
+      continue;
+    }
+    // replace_in_file: ✓ Replaced 2 occurrence(s) of "..." in src/api/auth.js
+    m = line.match(/✓ Replaced .*? in (.*)$/);
+    if (m) {
+      ops.push({ type: 'modify', path: m[1].trim() });
+      continue;
+    }
+    // append_to_file: ✓ Appended ... to src/api/auth.js
+    m = line.match(/✓ Appended .*? to (.*)$/);
+    if (m) {
+      ops.push({ type: 'modify', path: m[1].trim() });
+      continue;
+    }
+    // delete_file: ✓ Deleted src/api/auth.js
+    m = line.match(/✓ Deleted (.*)$/);
+    if (m) {
+      ops.push({ type: 'delete', path: m[1].trim() });
+      continue;
+    }
+  }
+  return ops;
+}
+
+function getFileSignatureSummary(filePath, projectPath) {
+  const abs = path.isAbsolute(filePath) ? filePath : path.resolve(projectPath, filePath);
+  if (!fs.existsSync(abs)) return null;
+  try {
+    const stats = fs.statSync(abs);
+    if (stats.isDirectory()) return null;
+    
+    let info = null;
+    if (parseFile) {
+      try {
+        info = parseFile(abs);
+      } catch (err) {
+        // ignore
+      }
+    }
+    
+    const summaryObj = {
+      exports: [],
+      classes: [],
+      functions: [],
+    };
+    
+    if (info) {
+      if (info.exports) {
+        for (const exp of info.exports) {
+          if (exp.name && exp.name !== 'default') {
+            summaryObj.exports.push(exp.name);
+          }
+        }
+      }
+      if (info.declarations) {
+        for (const dec of info.declarations) {
+          if (dec.kind === 'class') {
+            summaryObj.classes.push(dec.name);
+          } else if (dec.kind === 'function') {
+            summaryObj.functions.push(dec.name);
+          }
+        }
+      }
+    } else {
+      const code = fs.readFileSync(abs, 'utf8');
+      const classRegex = /class\s+(\w+)/g;
+      const funcRegex = /function\s+(\w+)/g;
+      const exportConstRegex = /export\s+const\s+(\w+)/g;
+      const exportFuncRegex = /export\s+function\s+(\w+)/g;
+      let match;
+      while ((match = classRegex.exec(code)) !== null) {
+        summaryObj.classes.push(match[1]);
+      }
+      while ((match = funcRegex.exec(code)) !== null) {
+        summaryObj.functions.push(match[1]);
+      }
+      while ((match = exportConstRegex.exec(code)) !== null) {
+        summaryObj.exports.push(match[1]);
+      }
+      while ((match = exportFuncRegex.exec(code)) !== null) {
+        summaryObj.exports.push(match[1]);
+      }
+    }
+    
+    summaryObj.exports = [...new Set(summaryObj.exports)].slice(0, 15);
+    summaryObj.classes = [...new Set(summaryObj.classes)].slice(0, 10);
+    summaryObj.functions = [...new Set(summaryObj.functions)].slice(0, 15);
+    
+    return summaryObj;
+  } catch (err) {
+    return null;
+  }
+}
+
 function estimateTokens(text) {
   if (!text) return 0;
   // heuristic: English/code ~3.8 chars/token, CJK ~1.5
@@ -30,9 +146,14 @@ class ConversationSummarizer {
   summarizeTurn(turnIndex, role, content) {
     let summary;
     if (role === 'tool') {
-      const status = content.includes('ERROR') ? 'FAILED' : 'SUCCESS';
-      const preview = content.slice(0, 200).replace(/\n/g, ' ');
-      summary = `[Tool ${status}] ${preview}${content.length > 200 ? '...' : ''}`;
+      const ops = extractFileOps(content);
+      if (ops.length > 0) {
+        summary = ops.map(op => `[${op.type.toUpperCase()}] ${op.path}`).join(', ');
+      } else {
+        const status = content.includes('ERROR') ? 'FAILED' : 'SUCCESS';
+        const preview = content.slice(0, 200).replace(/\n/g, ' ');
+        summary = `[Tool ${status}] ${preview}${content.length > 200 ? '...' : ''}`;
+      }
     } else if (role === 'assistant') {
       const lines = content.split('\n').filter(l => l.trim());
       const firstSentence = lines[0]?.slice(0, 200) || '';
@@ -121,6 +242,7 @@ class RelevantFileTracker {
 
 class ContextManager {
   constructor(options = {}) {
+    this.projectPath = options.projectPath || null;
     this.maxContextTokens = options.maxContextTokens || 120_000;
     this.systemPromptTokens = options.systemPromptTokens || 2000;
     this.toolDescriptionsTokens = options.toolDescriptionsTokens || 3000;
@@ -130,6 +252,7 @@ class ContextManager {
     this.conversation = [];
     this.turnCounter = 0;
     this.currentTask = '';
+    this.writtenFilesRegistry = new Map();
     this.metrics = {
       totalTurns: 0,
       summarizedTurns: 0,
@@ -150,6 +273,40 @@ class ContextManager {
       isSummarized: false,
       timestamp: Date.now(),
     };
+    
+    // Parse file operations if role is 'tool'
+    if (role === 'tool' && content) {
+      const ops = extractFileOps(content);
+      for (const op of ops) {
+        if (op.type === 'write' || op.type === 'modify') {
+          if (this.projectPath) {
+            const sig = getFileSignatureSummary(op.path, this.projectPath);
+            if (sig) {
+              this.writtenFilesRegistry.set(op.path, {
+                type: op.type,
+                turnIndex: turnIndex,
+                exports: sig.exports,
+                classes: sig.classes,
+                functions: sig.functions,
+                timestamp: Date.now()
+              });
+            } else {
+              this.writtenFilesRegistry.set(op.path, {
+                type: op.type,
+                turnIndex: turnIndex,
+                exports: [],
+                classes: [],
+                functions: [],
+                timestamp: Date.now()
+              });
+            }
+          }
+        } else if (op.type === 'delete') {
+          this.writtenFilesRegistry.delete(op.path);
+        }
+      }
+    }
+
     this.conversation.push(entry);
     this.metrics.totalTurns++;
 
@@ -167,6 +324,24 @@ class ContextManager {
   getCurrentTokenCount() {
     return this.conversation.reduce((sum, e) =>
       sum + (e.isSummarized ? estimateTokens(e.content) : e.tokens), 0);
+  }
+
+  getWrittenFilesRegistry() {
+    return this.writtenFilesRegistry;
+  }
+
+  getWrittenFilesRegistryText() {
+    if (!this.writtenFilesRegistry || this.writtenFilesRegistry.size === 0) return '';
+    const lines = ['[FILES WRITTEN/MODIFIED IN THIS SESSION]'];
+    for (const [filePath, info] of this.writtenFilesRegistry.entries()) {
+      const details = [];
+      if (info.classes.length > 0) details.push(`classes: ${info.classes.join(', ')}`);
+      if (info.exports.length > 0) details.push(`exports: ${info.exports.join(', ')}`);
+      if (info.functions.length > 0) details.push(`functions: ${info.functions.join(', ')}`);
+      const detailsStr = details.length > 0 ? ` (${details.join(' | ')})` : '';
+      lines.push(`- ${filePath}${detailsStr}`);
+    }
+    return lines.join('\n');
   }
 
   buildContextForLLM(options = {}) {
@@ -195,6 +370,12 @@ class ContextManager {
       }
     }
 
+    const writtenFilesText = this.getWrittenFilesRegistryText();
+    if (writtenFilesText) {
+      parts.push({ type: 'written', content: writtenFilesText, tokens: estimateTokens(writtenFilesText) });
+      usedTokens += estimateTokens(writtenFilesText);
+    }
+
     if (this.fileTracker) {
       const relevantFiles = this.fileTracker.getTopRelevantFiles(5);
       if (relevantFiles.length > 0) {
@@ -210,6 +391,7 @@ class ContextManager {
     const ordered = [
       parts.find(p => p.type === 'summary'),
       parts.find(p => p.type === 'recent'),
+      parts.find(p => p.type === 'written'),
       parts.find(p => p.type === 'files'),
     ].filter(Boolean);
     return ordered.map(p => p.content).join('\n\n');
@@ -286,6 +468,7 @@ class ContextManager {
     this.currentTask = '';
     this.summarizer = new ConversationSummarizer();
     if (this.fileTracker) this.fileTracker.clear();
+    this.writtenFilesRegistry = new Map();
     this.metrics = {
       totalTurns: 0,
       summarizedTurns: 0,

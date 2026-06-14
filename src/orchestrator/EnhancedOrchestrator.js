@@ -32,6 +32,7 @@ const { ProjectMemory } = require('../session/ProjectMemory');
 const { WorkLog } = require('../session/WorkLog');
 const { SituationReport } = require('../session/SituationReport');
 const { ContextManager } = require('../context/ContextManager');
+const { ParallelStepExecutor } = require('./ParallelStepExecutor');
 const config = require('../config');
 
 let TraceLogger = null;
@@ -213,30 +214,19 @@ class EnhancedOrchestrator {
       });
 
       let finalResult = '';
-      const totalSteps = plan.steps.length;
-      for (let i = this.taskManager.state.currentStepIndex; i < plan.steps.length; i++) {
-        this._updateTopic(`Step ${i+1}/${plan.steps.length}`, plan.steps[i]);
-        this._renderProgressBar(i + 1, totalSteps, plan.steps[i]);
-        try {
-          const stepResult = await this._executeStep(i, plan.steps[i], plan.steps.length, task, baseContext);
+      try {
+        finalResult = await ParallelStepExecutor.run(this, plan, task);
+      } catch (err) {
+        logger.warn(`Parallel execution failed: ${err.message}. Attempting sequential recovery/replanning...`);
+        this._log('parallel_execution_failed', { error: err.message });
+        const remainingTask = `The previous parallel execution failed. Error: ${err.message}. Please provide a recovery plan to complete the task: ${task}`;
+        const newPlan = await this.plannerAgent.plan(remainingTask);
+        this.taskManager.setPlan(newPlan.steps);
+        for (let i = 0; i < newPlan.steps.length; i++) {
+          this._updateTopic(`Recovery Step ${i+1}/${newPlan.steps.length}`, newPlan.steps[i]);
+          this._renderProgressBar(i + 1, newPlan.steps.length, newPlan.steps[i]);
+          const stepResult = await this._executeStep(i, newPlan.steps[i], newPlan.steps.length, task, this._baseContext(newPlan.steps[i]));
           finalResult += stepResult;
-
-          if (stepResult.includes('Reached maximum iterations')) {
-            logger.warn('Step partially completed due to iteration limit. Continuing from current state.');
-            this._log('step_iteration_limit', { stepIndex: i, step: plan.steps[i] });
-            const continuationPrompt = `The previous step was partially completed: ${plan.steps[i]}. Please continue or finish the step.`;
-            const continuationPlan = await this.plannerAgent.plan(continuationPrompt);
-            plan.steps.splice(i + 1, 0, ...continuationPlan.steps);
-            this.taskManager.setPlan(plan.steps);
-          }
-        } catch (err) {
-          logger.warn(`Step ${i+1} failed: ${err.message}. Attempting to re-plan...`);
-          this._log('step_replan', { stepIndex: i, step: plan.steps[i], error: err.message });
-          const remainingTask = `The previous plan failed at step ${i+1}: ${plan.steps[i]}. Error: ${err.message}. Please provide a new plan to complete the task: ${task}`;
-          const newPlan = await this.plannerAgent.plan(remainingTask);
-          plan.steps = [...plan.steps.slice(0, i), ...newPlan.steps];
-          this.taskManager.setPlan(plan.steps);
-          i--;
         }
       }
 
@@ -366,6 +356,7 @@ class EnhancedOrchestrator {
     const stepStart = Date.now();
     const before = this._snapshotWorkspace();
     const stepId = `step_${index + 1}`;
+    let changedFiles = [];
 
     this.taskManager.updateStepStatus(index, 'in-progress');
     logger.header(`Step ${index + 1}/${totalSteps}: ${step.substring(0, 80)}`);
@@ -441,7 +432,7 @@ class EnhancedOrchestrator {
       // Record assistant executor completion
       this.contextManager.addMessage('assistant', result);
 
-      const changedFiles = this._diffSnapshot(before, this._snapshotWorkspace());
+      changedFiles = this._diffSnapshot(before, this._snapshotWorkspace());
       const durationMs = Date.now() - stepStart;
       if (changedFiles.length) {
         await this.analyzer.analyze();
@@ -489,7 +480,12 @@ class EnhancedOrchestrator {
       if (this.traceLogger) this.traceLogger.logStep(stepId, step, 'complete', durationMs, { changedFiles });
       return `Step ${index + 1}: ${step}\n${result}\n\n`;
     } catch (err) {
-      await this.selfHealing.rollbackOnFailure(backup);
+      if (this.selfHealing.rollbackStep) {
+        const currentChanged = this._diffSnapshot(before, this._snapshotWorkspace());
+        await this.selfHealing.rollbackStep(backup, currentChanged);
+      } else {
+        await this.selfHealing.rollbackOnFailure(backup);
+      }
       const durationMs = Date.now() - stepStart;
       this.metrics.recordStep(false);
       this.taskManager.failStep(index, err.message);
@@ -499,19 +495,41 @@ class EnhancedOrchestrator {
     }
   }
 
-  _baseContext() {
+  _baseContext(currentStep = null) {
+    const summary = this.analyzer.getSummary();
+    let relevantFilesText = '';
+    
+    if (currentStep && this.contextManager.fileTracker) {
+      const filePaths = this.analyzer.getDependencyGraph().getAllFiles().map(f => path.resolve(this.projectPath, f));
+      this.contextManager.fileTracker.scoreRelevance(currentStep, filePaths);
+      const topFiles = this.contextManager.fileTracker.getTopRelevantFiles(10);
+      if (topFiles.length > 0) {
+        relevantFilesText = '\nTop Relevant Files for this step:\n' + topFiles.map(fp => {
+          const rel = path.relative(this.projectPath, fp).replace(/\\/g, '/');
+          let sigs = '';
+          const entry = this.repositoryMap?.map?.files[rel];
+          if (entry && entry.exports) {
+            sigs = ` (exports: ${entry.exports.join(', ')})`;
+          }
+          return `- ${rel}${sigs}`;
+        }).join('\n');
+      }
+    }
+
     const rawContextObj = {
-      project: this.analyzer.getSummary(),
-      dependencyGraph: this.analyzer.getDependencyGraph().toJSON(),
+      project: summary,
       recentTasks: this.session.getRecentTasks(),
       repositoryMap: {
         updatedAt: this.repositoryMap?.map?.updatedAt,
         files: Object.keys(this.repositoryMap?.map?.files || {}).length
       }
     };
-    const prunedContextObj = this.selfHealing ? this.selfHealing.pruneContext(rawContextObj, 15000) : rawContextObj;
-    const ctx = JSON.stringify(prunedContextObj, null, 2);
-    // Prepend situation report from prior sessions (if any)
+    
+    let ctx = JSON.stringify(rawContextObj, null, 2);
+    if (relevantFilesText) {
+      ctx += '\n' + relevantFilesText;
+    }
+
     if (this.situationReport) {
       return this.situationReport + '\n\nPROJECT CONTEXT:\n' + ctx;
     }
