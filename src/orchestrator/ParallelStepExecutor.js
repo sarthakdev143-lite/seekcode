@@ -77,16 +77,14 @@ class ParallelStepExecutor {
     // steps, but never exceed MAX_PARALLEL_TABS.
     //
     // Scale rule ("wisdom to scale tabs"):
-    //   ≤ 4 steps  → max 1 tab   (sequential — no parallelism benefit)
-    //   ≤ 8 steps  → max 2 tabs
-    //   ≤ 12 steps → max 3 tabs
-    //   ≤ 20 steps → max 4 tabs
-    //   > 20 steps → max 5 tabs
+    //   totalSteps = 1  → max 1 tab
+    //   ≤ 4 steps       → max 2 tabs
+    //   ≤ 8 steps       → max 3 tabs
+    //   > 8 steps       → max 5 tabs
     let MAX_CONCURRENT;
-    if (totalSteps <= 4)       MAX_CONCURRENT = 1;
-    else if (totalSteps <= 8)  MAX_CONCURRENT = 2;
-    else if (totalSteps <= 12) MAX_CONCURRENT = 3;
-    else if (totalSteps <= 20) MAX_CONCURRENT = 4;
+    if (totalSteps === 1)      MAX_CONCURRENT = 1;
+    else if (totalSteps <= 4)  MAX_CONCURRENT = 2;
+    else if (totalSteps <= 8)  MAX_CONCURRENT = 3;
     else                       MAX_CONCURRENT = MAX_PARALLEL_TABS; // 5
 
     const tabAssignment = new Map(); // stepIndex -> tabName string

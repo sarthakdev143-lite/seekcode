@@ -92,7 +92,7 @@ class RepairAgent {
         '3. Do NOT try the same approach twice — if attempt 1 failed, change your strategy.',
         '4. After fixing, run the relevant command to verify your fix works.',
         '5. If missing package: use run_command to npm install it, then verify.',
-        '6. Output a short repair summary when done.',
+        '6. Output a short repair summary in the SAME response as your tool call(s) once the fix is implemented. If the repair is not fully complete and verified, you MUST output a tool call. Only output plain text without tool calls when the repair is 100% complete.',
       ].join('\n');
 
       logger.info(`Repair attempt ${attempt}/${this.maxRetries} for: ${currentValidation.phase}`);
