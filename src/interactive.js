@@ -61,11 +61,21 @@ async function getTask(rl) {
   });
 }
 
-async function interactiveMode(projectPath) {
+/**
+ * @param {string} projectPath
+ * @param {{ setCurrentAgent?: (agent: any) => void }} [options]
+ */
+async function interactiveMode(projectPath, options = {}) {
   // Clear terminal for a fresh UI
   process.stdout.write('\x1Bc');
 
   const agent = new SeekCodeAgent(projectPath);
+
+  // Register agent with the crash handler immediately — before init() —
+  // so even an init-time crash will flush partial logs.
+  if (typeof options.setCurrentAgent === 'function') {
+    options.setCurrentAgent(agent);
+  }
 
   // Header
   console.log(chalk.cyan.bold('SeekCode') + ' | ' + chalk.white('Agentic CLI') + '\n');
@@ -83,6 +93,16 @@ async function interactiveMode(projectPath) {
     logger.error(err.message);
     process.exit(1);
   }
+
+  // ── Print log file locations so they are always discoverable ──────────────
+  if (agent.traceLogger) {
+    console.log(chalk.dim('  📝 Seekcode trace  : ') + chalk.cyan(agent.traceLogger.projectLogPath));
+  }
+  if (agent.gateway.sessionLogPath) {
+    console.log(chalk.dim('  📋 Gateway log     : ') + chalk.cyan(agent.gateway.sessionLogPath));
+    console.log(chalk.dim('     (full per-iteration tool call & LLM logs are here)'));
+  }
+  console.log('');
 
   console.log(chalk.dim('  Commands: type your task and press Enter (or Enter twice for multi-line)'));
   console.log(chalk.dim('  Type "exit" or "quit" to leave.\n'));

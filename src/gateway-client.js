@@ -6,6 +6,7 @@ class GatewayClient {
   constructor(projectPath) {
     this.baseUrl = config.GATEWAY_URL;
     this.sessionId = null;
+    this.sessionLogPath = null; // rich per-iteration log written by the gateway
     this.projectPath = projectPath || null;
     this.readOnly = false;
   }
@@ -24,10 +25,16 @@ class GatewayClient {
     const data = await res.json();
     if (data.sessionId) {
       this.sessionId = data.sessionId;
+      // Store gateway session log path so callers can record it for debugging
+      this.sessionLogPath = data.sessionLogPath || null;
       logger.success('Gateway session created: ' + this.sessionId);
+      if (this.sessionLogPath) {
+        logger.dim('Gateway session log: ' + this.sessionLogPath);
+      }
     } else {
       throw new Error('Failed to create gateway session');
     }
+    return data; // return full response so callers get sessionLogPath etc.
   }
 
   async chat(prompt, tab, model, readOnly) {
@@ -68,6 +75,7 @@ class GatewayClient {
       await fetch(this.baseUrl + '/session/' + this.sessionId + '/close', { method: 'POST' });
       logger.info('Gateway session closed');
       this.sessionId = null;
+      this.sessionLogPath = null;
     }
   }
 }

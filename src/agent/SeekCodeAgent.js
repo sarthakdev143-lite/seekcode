@@ -49,6 +49,16 @@ class SeekCodeAgent {
     await this.analyzer.analyze();
     await this.gateway.createSession();
 
+    // Record the gateway session log path in the seekcode trace so it's
+    // easy to find the rich per-iteration logs when debugging.
+    if (this.traceLogger && this.gateway.sessionLogPath) {
+      this.traceLogger.logEvent('gateway_session_created', {
+        gatewaySessionId  : this.gateway.sessionId,
+        gatewaySessionLog : this.gateway.sessionLogPath,
+        note: 'Rich per-iteration logs (tool calls, LLM responses) are in gatewaySessionLog'
+      });
+    }
+
     // Start session in project memory
     this.projectMemory.startSession(this._sessionId, 'Interactive CLI Session');
     // Generate situation report from prior sessions
@@ -64,16 +74,40 @@ class SeekCodeAgent {
 
   async _callLLMWithTrace(prompt, handlerName) {
     if (!this.traceLogger) return await this.gateway.chat(prompt, 'coder', 'R1');
-    const turnId = `${handlerName}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+
+    const turnId    = `${handlerName}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     const startTime = Date.now();
+
+    // ── Log the START of the call immediately — before awaiting the gateway.
+    // This is critical: if the gateway crashes mid-run, at least the user
+    // input is captured in the trace (previously it was only logged AFTER
+    // receiving the full response, so crashes silently dropped the entry).
+    this.traceLogger.logEvent('llm_turn_start', {
+      turnId,
+      handler       : handlerName,
+      intent        : this._currentIntent,
+      promptLength  : prompt.length,
+      promptPreview : prompt.substring(0, 500),
+    });
+
     try {
-      const response = await this.gateway.chat(prompt, 'coder', 'R1');
-      const duration = Date.now() - startTime;
-      this.traceLogger.logLLMTurn(turnId, prompt, response, duration, { handler: handlerName, intent: this._currentIntent });
+      const response   = await this.gateway.chat(prompt, 'coder', 'R1');
+      const durationMs = Date.now() - startTime;
+      this.traceLogger.logLLMTurn(
+        turnId, prompt, response, durationMs,
+        { handler: handlerName, intent: this._currentIntent }
+      );
       return response;
     } catch (error) {
-      const duration = Date.now() - startTime;
-      this.traceLogger.logEvent('llm_error', { turnId, handler: handlerName, durationMs: duration, error: error.message });
+      const durationMs = Date.now() - startTime;
+      this.traceLogger.logEvent('llm_turn_error', {
+        turnId,
+        handler    : handlerName,
+        durationMs,
+        error      : error.message,
+        // Also record if we know the gateway session log for easier debugging
+        gatewayLog : this.gateway.sessionLogPath || null,
+      });
       throw error;
     }
   }

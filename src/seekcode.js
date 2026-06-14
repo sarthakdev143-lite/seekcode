@@ -14,9 +14,27 @@ const { ProjectAnalyzer } = require('./analyzer/ProjectAnalyzer');
 
 const { TraceLogger } = require('./trace-logger');
 
+// Module-level reference to the active agent so the crash handler can
+// flush the trace logger and close the gateway session before exiting.
+let _currentAgent = null;
+function setCurrentAgent(agent) { _currentAgent = agent; }
+
 // ---------- Crash Handling ----------
 function setupCrashHandler() {
   const handler = (error, type) => {
+    // Flush trace logger BEFORE exiting so no buffered entries are lost.
+    // The write stream's OS buffer would be dropped by an abrupt process.exit().
+    try {
+      if (_currentAgent?.traceLogger) {
+        _currentAgent.traceLogger.logEvent('process_crash', {
+          type,
+          error  : error.message,
+          stack  : (error.stack || '').slice(0, 2000),
+        });
+        _currentAgent.traceLogger.close();
+      }
+    } catch { /* best-effort — don't let logger errors mask the original crash */ }
+
     const crashFile = TraceLogger.logCrash(error, { type });
     logger.error(`\nCRASH DETECTED: ${error.message}`);
     if (crashFile) {
@@ -183,7 +201,7 @@ if (!isCommand && !isHelp) {
 
     const gatewayReady = await startGatewayIfNeeded();
     if (!gatewayReady) process.exit(1);
-    await require('./interactive').interactiveMode(process.cwd()).finally(() => {
+    await require('./interactive').interactiveMode(process.cwd(), { setCurrentAgent }).finally(() => {
       stopGateway();
       process.exit(0);
     });
@@ -191,6 +209,8 @@ if (!isCommand && !isHelp) {
 } else {
   program.parse(process.argv);
 }
+
+module.exports = { setCurrentAgent };
 
 // Cleanup on exit
 process.on('exit', () => stopGateway());
