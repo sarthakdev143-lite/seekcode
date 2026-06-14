@@ -393,7 +393,9 @@ class EnhancedOrchestrator {
     try {
       logger.info(`Starting codebase research for step ${index + 1}...`);
       this._log('research_start', { stepIndex: index + 1, step, semanticFiles: semanticFiles.length });
-      researchFindings = await this.researchAgent.research(task, step, baseContext, semanticFiles);
+      researchFindings = await this.researchAgent.research(task, step, baseContext, semanticFiles, {
+        tab: this.options?.tab ? `research-${this.options.tab}` : 'researcher'
+      });
       this._log('research_end', { stepIndex: index + 1, findingsLen: researchFindings.length });
       logger.success(`Research phase complete.`);
     } catch (researchErr) {
@@ -427,7 +429,9 @@ class EnhancedOrchestrator {
 
     try {
       const result = await this.selfHealing.executeWithRetry(async () => {
-        return await this.executorAgent.execute(prompt);
+        return await this.executorAgent.execute(prompt, {
+          tab: this.options?.tab ? `coder-${this.options.tab}` : 'coder'
+        });
       }, step);
 
       // Record assistant executor completion
@@ -454,7 +458,9 @@ class EnhancedOrchestrator {
 
         if (!validation.success) {
           const combinedRepairContext = baseContext + '\n\nRECENT CONVERSATION:\n' + this.contextManager.buildContextForLLM();
-          const repaired = await this.repairAgent.repair(validation, step, combinedRepairContext);
+          const repaired = await this.repairAgent.repair(validation, step, combinedRepairContext, {
+            tab: this.options?.tab ? `repair-${this.options.tab}` : 'repair'
+          });
           this._log('repair_step', { stepIndex: index + 1, success: repaired, error: validation.error });
           this.metrics.recordRepair(repaired);
           if (!repaired) {

@@ -20,7 +20,8 @@ class RepairAgent {
     this.maxRetries     = options.maxRetries     || 3;
   }
 
-  async repair(validation, step, baseContext) {
+  async repair(validation, step, baseContext, options = {}) {
+    const tab = options.tab || 'repair';
     let currentValidation = validation;
     let lastFingerprint = '';
 
@@ -96,7 +97,7 @@ class RepairAgent {
       ].join('\n');
 
       logger.info(`Repair attempt ${attempt}/${this.maxRetries} for: ${currentValidation.phase}`);
-      await this.gateway.chat(repairPrompt, 'repair', 'R1');
+      await this.gateway.chat(repairPrompt, tab, 'R1');
       currentValidation = await this.validatorAgent.validate({ source: 'repair', fingerprint, attempt });
 
       if (currentValidation.success) {
@@ -142,7 +143,7 @@ class RepairAgent {
         ].join('\n');
         
         logger.info(`Running repair with human guidance...`);
-        await this.gateway.chat(guidancePrompt, 'repair', 'R1');
+        await this.gateway.chat(guidancePrompt, tab, 'R1');
         currentValidation = await this.validatorAgent.validate({ source: 'repair-guidance', fingerprint: lastFingerprint });
         
         if (currentValidation.success) {
@@ -185,7 +186,7 @@ class RepairAgent {
     });
   }
 
-  async repairReview(task, review, baseContext) {
+  async repairReview(task, review, baseContext, options = {}) {
     const findings = review.findings || [];
     if (!findings.length) return false;
 
@@ -210,7 +211,8 @@ class RepairAgent {
       '3. Verify your changes compile / pass lint.',
     ].join('\n');
 
-    await this.gateway.chat(prompt, 'repair', 'R1');
+    const tab = options.tab || 'repair';
+    await this.gateway.chat(prompt, tab, 'R1');
     const validation = await this.validatorAgent.validate({ source: 'review-repair' });
     const success = validation.success;
     this.journal?.record('review-repair-validation', { success, phase: validation.phase, error: validation.error });

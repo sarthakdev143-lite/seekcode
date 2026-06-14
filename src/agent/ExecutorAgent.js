@@ -5,8 +5,9 @@ class ExecutorAgent {
     this.gateway = gateway;
   }
 
-  async execute(prompt) {
-    return this.gateway.chat(prompt, 'coder', 'R1');
+  async execute(prompt, options = {}) {
+    const tab = options.tab || 'coder';
+    return this.gateway.chat(prompt, tab, 'R1');
   }
 }
 

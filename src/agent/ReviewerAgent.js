@@ -6,7 +6,7 @@ class ReviewerAgent {
     this.semanticSearch = semanticSearch;
   }
 
-  async review(task, baseContext, changedFiles = []) {
+  async review(task, baseContext, changedFiles = [], options = {}) {
     const related = this.semanticSearch ? this.semanticSearch.search(task, 8).map(r => r.path) : [];
     const prompt = [
       'You are the Reviewer Agent for SeekCode.',
@@ -27,7 +27,8 @@ class ReviewerAgent {
       baseContext
     ].join('\n');
 
-    const response = await this.gateway.chat(prompt, 'reviewer', 'R1');
+    const tab = options.tab || 'reviewer';
+    const response = await this.gateway.chat(prompt, tab, 'R1');
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return { passed: false, findings: ['Reviewer returned invalid JSON'] };
     try {

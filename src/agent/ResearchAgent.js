@@ -5,7 +5,7 @@ class ResearchAgent {
     this.gateway = gateway;
   }
 
-  async research(task, step, baseContext, semanticFiles = []) {
+  async research(task, step, baseContext, semanticFiles = [], options = {}) {
     const prompt = [
       'You are the Research Agent for SeekCode.',
       'Your job is to thoroughly research the codebase and gather all necessary details for the execution step.',
@@ -29,7 +29,8 @@ class ResearchAgent {
       baseContext
     ].join('\n');
 
-    return this.gateway.chat(prompt, 'researcher', 'V3');
+    const tab = options.tab || 'researcher';
+    return this.gateway.chat(prompt, tab, 'V3');
   }
 }
 
