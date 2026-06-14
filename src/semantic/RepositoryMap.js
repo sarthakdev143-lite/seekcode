@@ -29,8 +29,8 @@ class RepositoryMap {
       const details = this.analyzer.fileDetails.get(file) || { imports: [], exports: [], declarations: [] };
       const stat = fs.statSync(abs);
       const symbols = [
-        ...details.declarations.map(d => ({ name: d.name, kind: d.kind, line: d.line })),
-        ...details.exports.map(e => ({ name: e.name, kind: e.kind, line: e.line, exported: true }))
+        ...details.declarations.map(d => ({ name: d.name, kind: d.kind, line: d.line, signature: d.signature || d.name })),
+        ...details.exports.map(e => ({ name: e.name, kind: e.kind, line: e.line, exported: true, signature: e.signature || e.name }))
       ];
 
       files[file] = {
@@ -68,8 +68,8 @@ class RepositoryMap {
       const details = this.analyzer.fileDetails.get(file) || { imports: [], exports: [], declarations: [] };
       const stat = fs.statSync(abs);
       const symbols = [
-        ...details.declarations.map(d => ({ name: d.name, kind: d.kind, line: d.line })),
-        ...details.exports.map(e => ({ name: e.name, kind: e.kind, line: e.line, exported: true }))
+        ...details.declarations.map(d => ({ name: d.name, kind: d.kind, line: d.line, signature: d.signature || d.name })),
+        ...details.exports.map(e => ({ name: e.name, kind: e.kind, line: e.line, exported: true, signature: e.signature || e.name }))
       ];
       this.map.files[file] = {
         path: file,

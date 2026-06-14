@@ -6,7 +6,7 @@ module.exports = {
   SUPPORTED_EXTENSIONS: ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'],
   MAX_FILE_SIZE_BYTES: 5 * 1024 * 1024,
   PARSE_CONCURRENCY: 4,
-  MAX_CONTEXT_TOKENS: 120000,
+  MAX_CONTEXT_TOKENS: 1000000,
   SECURITY_POLICY: {
     approvalRequired: { delete: true, writeOutsideProject: true, network: true, shell: true, install: true },
     allowNetwork: false,

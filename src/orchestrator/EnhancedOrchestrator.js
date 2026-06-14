@@ -31,6 +31,8 @@ const { SelfHealingOrchestrator } = require('../self-healing');
 const { ProjectMemory } = require('../session/ProjectMemory');
 const { WorkLog } = require('../session/WorkLog');
 const { SituationReport } = require('../session/SituationReport');
+const { ContextManager } = require('../context/ContextManager');
+const config = require('../config');
 
 let TraceLogger = null;
 try { TraceLogger = require('../trace-logger').TraceLogger; } catch {}
@@ -44,6 +46,11 @@ class EnhancedOrchestrator {
     this.traceLogger = null;
     this.situationReport = null;
     this._sessionId = `orch_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+    this.contextManager = new ContextManager({
+      maxContextTokens: config.MAX_CONTEXT_TOKENS || 1000000,
+      projectPath: this.projectPath
+    });
 
     // Persistent cross-session memory — initialized immediately
     this.projectMemory = new ProjectMemory(this.projectPath);
@@ -118,6 +125,17 @@ class EnhancedOrchestrator {
       this.projectMemory.setKnownPort(options.port);
     }
     this.executionLog = [];
+
+    this.contextManager.reset();
+    this.contextManager.setTask(task);
+    this.contextManager.addMessage('user', `Overall Task: ${task}`);
+
+    // Score all project files
+    if (this.contextManager.fileTracker) {
+      const filePaths = this.analyzer.getDependencyGraph().getAllFiles().map(f => path.resolve(this.projectPath, f));
+      this.contextManager.fileTracker.scoreRelevance(task, filePaths);
+    }
+
     const explicitTaskId = process.env.SEEKCODE_TASK_ID || null;
     const pendingTaskId = TaskManager.findPendingTask(this.projectPath, explicitTaskId);
     const baseContext = this._baseContext();
@@ -231,7 +249,9 @@ class EnhancedOrchestrator {
       if (!finalValidation.success) {
         logger.warn('Final validation failed. Attempting autonomous repair...');
         this._log('repair_start', { trigger: 'final_validation', error: finalValidation.error });
-        const repairSucceeded = await this.repairAgent.repair(finalValidation, 'Final completion', baseContext);
+        
+        const combinedContext = baseContext + '\n\nRECENT CONVERSATION:\n' + this.contextManager.buildContextForLLM();
+        const repairSucceeded = await this.repairAgent.repair(finalValidation, 'Final completion', combinedContext);
         this._log('repair_end', { trigger: 'final_validation', success: repairSucceeded });
         if (repairSucceeded) {
           finalValidation = await this.validatorAgent.validate(this._getValidationOptions({ source: 'final-after-repair' }));
@@ -269,8 +289,9 @@ class EnhancedOrchestrator {
       }
 
       const allChangedFiles = this.executionLog.flatMap(entry => entry.changedFiles || []);
+      const combinedContextForReview = baseContext + '\n\nRECENT CONVERSATION:\n' + this.contextManager.buildContextForLLM();
       let review = finalValidation.success
-        ? await this.reviewerAgent.review(task, baseContext, Array.from(new Set(allChangedFiles)))
+        ? await this.reviewerAgent.review(task, combinedContextForReview, Array.from(new Set(allChangedFiles)))
         : { passed: false, findings: ['Skipped review because validation failed'] };
       this._log('review_complete', { passed: review.passed, findings: review.findings?.slice(0, 5) });
       this.journal.record('review', review);
@@ -278,11 +299,13 @@ class EnhancedOrchestrator {
 
       if (finalValidation.success && !review.passed) {
         this._log('repair_review_start', { findings: review.findings?.slice(0, 5) });
-        reviewRepairSucceeded = await this.repairAgent.repairReview(task, review, baseContext);
+        const combinedContextForReviewRepair = baseContext + '\n\nRECENT CONVERSATION:\n' + this.contextManager.buildContextForLLM();
+        reviewRepairSucceeded = await this.repairAgent.repairReview(task, review, combinedContextForReviewRepair);
         this._log('repair_review_end', { success: reviewRepairSucceeded });
         this.metrics.recordRepair(reviewRepairSucceeded);
         if (reviewRepairSucceeded) {
-          review = await this.reviewerAgent.review(task, baseContext, Array.from(new Set(allChangedFiles)));
+          const combinedContextForReviewFinal = baseContext + '\n\nRECENT CONVERSATION:\n' + this.contextManager.buildContextForLLM();
+          review = await this.reviewerAgent.review(task, combinedContextForReviewFinal, Array.from(new Set(allChangedFiles)));
           this._log('review_after_repair', { passed: review.passed });
           this.journal.record('review-after-repair', review);
         }
@@ -350,6 +373,24 @@ class EnhancedOrchestrator {
 
     const backup = await this.selfHealing.createBackup(Array.from(before.keys()));
 
+    // Refresh scores and cache contents of top relevant files
+    if (this.contextManager.fileTracker) {
+      const filePaths = this.analyzer.getDependencyGraph().getAllFiles().map(f => path.resolve(this.projectPath, f));
+      this.contextManager.fileTracker.scoreRelevance(`${task} ${step}`, filePaths);
+      
+      const topFiles = this.contextManager.fileTracker.getTopRelevantFiles(5);
+      for (const fp of topFiles) {
+        try {
+          if (fs.existsSync(fp)) {
+            const content = fs.readFileSync(fp, 'utf8');
+            this.contextManager.fileTracker.cacheFileContent(fp, content);
+          }
+        } catch (e) {
+          logger.warn(`Failed to cache content of relevant file ${fp}: ${e.message}`);
+        }
+      }
+    }
+
     // ENHANCEMENT: Cognitive Loop (Research -> Strategy -> Execution)
     const semanticFiles = this.semanticSearch.search(`${task} ${step}`, 8).map(r => ({
       path: r.path,
@@ -370,6 +411,11 @@ class EnhancedOrchestrator {
       researchFindings = `Research failed: ${researchErr.message}`;
     }
 
+    // Record step user prompt context
+    const stepPrompt = `Current Step (${index + 1}/${totalSteps}): ${step}\nResearch Findings:\n${researchFindings}`;
+    this.contextManager.addMessage('user', stepPrompt);
+    const dynamicConversationContext = this.contextManager.buildContextForLLM();
+
     const prompt = [
       'You are SeekCode, a senior agentic software engineer. Follow this disciplined cycle:',
       '',
@@ -377,18 +423,11 @@ class EnhancedOrchestrator {
       '2. EXECUTION: Use surgical tools (replace_in_file) whenever possible. Avoid full-file rewrites.',
       '3. VALIDATION: After every change, run tests or build to verify.',
       '',
-      'RESEARCH FINDINGS (from Researcher Agent):',
-      researchFindings,
-      '',
       'PROJECT CONTEXT:',
       baseContext,
       '',
-      'OVERALL TASK:',
-      task,
-      '',
-      this._priorWork(),
-      `CURRENT STEP (${index + 1}/${totalSteps}):`,
-      step,
+      'CONVERSATION AND RESEARCH CONTEXT:',
+      dynamicConversationContext,
       '',
       'If you identify a bug during implementation, fix it immediately.',
       'Be thorough. If you fail to fix an issue in 3 attempts, backtrack and re-evaluate your strategy.'
@@ -398,6 +437,10 @@ class EnhancedOrchestrator {
       const result = await this.selfHealing.executeWithRetry(async () => {
         return await this.executorAgent.execute(prompt);
       }, step);
+
+      // Record assistant executor completion
+      this.contextManager.addMessage('assistant', result);
+
       const changedFiles = this._diffSnapshot(before, this._snapshotWorkspace());
       const durationMs = Date.now() - stepStart;
       if (changedFiles.length) {
@@ -414,8 +457,12 @@ class EnhancedOrchestrator {
       if (changedFiles.length > 0 || this._resultMentionsToolMutation(result)) {
         const validation = await this.validatorAgent.validate(this._getValidationOptions({ source: 'step', index: index + 1, changedFiles }));
 
+        // Record validation outcome
+        this.contextManager.addMessage('tool', `Validation [${validation.success ? 'SUCCESS' : 'FAILED'}]: ${validation.error || 'Passed checks.'}`);
+
         if (!validation.success) {
-          const repaired = await this.repairAgent.repair(validation, step, baseContext);
+          const combinedRepairContext = baseContext + '\n\nRECENT CONVERSATION:\n' + this.contextManager.buildContextForLLM();
+          const repaired = await this.repairAgent.repair(validation, step, combinedRepairContext);
           this._log('repair_step', { stepIndex: index + 1, success: repaired, error: validation.error });
           this.metrics.recordRepair(repaired);
           if (!repaired) {
@@ -423,6 +470,8 @@ class EnhancedOrchestrator {
             this.taskManager.failStep(index, validation.error || 'Validation failed');
             throw new Error(`Validation failed after step ${index + 1}: ${validation.error || validation.phase}`);
           }
+          // Record successful repair
+          this.contextManager.addMessage('assistant', `Step ${index + 1} repaired successfully.`);
           await this.analyzer.analyze();
           this.repositoryMap.updateChangedFiles(changedFiles);
           this.semanticSearch.refresh();
@@ -451,7 +500,7 @@ class EnhancedOrchestrator {
   }
 
   _baseContext() {
-    const ctx = JSON.stringify({
+    const rawContextObj = {
       project: this.analyzer.getSummary(),
       dependencyGraph: this.analyzer.getDependencyGraph().toJSON(),
       recentTasks: this.session.getRecentTasks(),
@@ -459,7 +508,9 @@ class EnhancedOrchestrator {
         updatedAt: this.repositoryMap?.map?.updatedAt,
         files: Object.keys(this.repositoryMap?.map?.files || {}).length
       }
-    }, null, 2);
+    };
+    const prunedContextObj = this.selfHealing ? this.selfHealing.pruneContext(rawContextObj, 15000) : rawContextObj;
+    const ctx = JSON.stringify(prunedContextObj, null, 2);
     // Prepend situation report from prior sessions (if any)
     if (this.situationReport) {
       return this.situationReport + '\n\nPROJECT CONTEXT:\n' + ctx;

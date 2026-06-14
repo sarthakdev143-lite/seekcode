@@ -147,22 +147,49 @@ class SelfHealingOrchestrator {
       logger.warn('Rolling back to previous state...');
 
       if (originalState?.backups) {
+        // 1. Copy backed up files back
         for (const [file, backup] of Object.entries(originalState.backups)) {
-          // FIXED: existsSync
           if (fs.existsSync(backup)) {
+            await fs.promises.mkdir(path.dirname(file), { recursive: true });
             await fs.promises.copyFile(backup, file);
             logger.dim(`Restored: ${file}`);
           }
         }
+
+        // 2. Identify and delete newly created files
+        const originalSet = new Set(Object.keys(originalState.backups).map(f => path.resolve(f)));
+        const skip = new Set(['.git', 'node_modules', '.seekcode']);
+        
+        const walk = async (dir) => {
+          if (!fs.existsSync(dir)) return;
+          const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (skip.has(entry.name)) continue;
+            const abs = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              await walk(abs);
+              try {
+                const contents = await fs.promises.readdir(abs);
+                if (contents.length === 0) {
+                  await fs.promises.rmdir(abs);
+                }
+              } catch {}
+            } else {
+              if (!originalSet.has(path.resolve(abs))) {
+                try {
+                  await fs.promises.unlink(abs);
+                  logger.dim(`Deleted new file on rollback: ${abs}`);
+                } catch (err) {
+                  logger.warn(`Failed to delete new file ${abs}: ${err.message}`);
+                }
+              }
+            }
+          }
+        };
+        await walk(this.projectPath);
       }
 
-      const { GitManager } = require('./git');
-      const git = new GitManager(this.projectPath);
-      if (git.isRepo()) {
-        git._run('git reset --hard HEAD');
-        logger.success('Git hard reset to HEAD completed');
-      }
-
+      logger.success('Rollback completed (non-destructive)');
       return true;
     } catch (err) {
       logger.error(`Rollback failed: ${err.message}`);
@@ -178,9 +205,10 @@ class SelfHealingOrchestrator {
 
     for (const file of files) {
       const absPath = path.resolve(this.projectPath, file);
-      // FIXED: existsSync
       if (fs.existsSync(absPath)) {
-        const backupPath = path.join(backupDir, path.basename(file));
+        const relPath = path.relative(this.projectPath, absPath).replace(/\\/g, '/');
+        const backupPath = path.join(backupDir, relPath);
+        await fs.promises.mkdir(path.dirname(backupPath), { recursive: true });
         await fs.promises.copyFile(absPath, backupPath);
         backups[absPath] = backupPath;
       }
@@ -188,7 +216,6 @@ class SelfHealingOrchestrator {
 
     return { backups, backupDir };
   }
-
   // ── Auto-checkpoint interval ───────────────────────────────────────────────
   startAutoCheckpoint(stateFn, intervalMs = 60_000) {
     if (this._checkpointTimer) clearInterval(this._checkpointTimer);

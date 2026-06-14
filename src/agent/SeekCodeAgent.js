@@ -22,7 +22,7 @@ class SeekCodeAgent {
     this.analyzer = null;
     this.conversationHistory = [];
     this.contextManager = new ContextManager({
-      maxContextTokens: config.MAX_CONTEXT_TOKENS || 120000,
+      maxContextTokens: config.MAX_CONTEXT_TOKENS || 1000000,
       projectPath: this.projectPath,
     });
     this.sandbox = new SecuritySandbox({
