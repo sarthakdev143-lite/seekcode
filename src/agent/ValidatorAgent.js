@@ -19,7 +19,7 @@ class ValidatorAgent {
         phase: result.phase,
         success: result.success,
         error: result.error,
-        ...context,
+        ...options,
         timestamp: new Date().toISOString()
       });
     }

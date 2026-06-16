@@ -14,15 +14,60 @@ class GatewayClient {
   /** Activate read-only mode for all subsequent chat() calls */
   setReadOnly(val) { this.readOnly = Boolean(val); }
 
+  async _fetchJson(url, options = {}, timeoutMs = config.GATEWAY_REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new Error(`Gateway request timed out after ${timeoutMs}ms: ${url}`);
+      }
+      throw new Error(`Could not reach gateway at ${this.baseUrl}: ${err.message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const text = await res.text();
+    let data = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`Gateway returned non-JSON response (${res.status}): ${text.slice(0, 500)}`);
+      }
+    }
+
+    if (!res.ok) {
+      const detail = data.error || data.message || res.statusText || text || 'unknown error';
+      throw new Error(`Gateway error ${res.status}: ${detail}`);
+    }
+
+    return data;
+  }
+
   async createSession() {
     const body = {};
     if (this.projectPath) body.workingDir = this.projectPath;
-    const res = await fetch(this.baseUrl + '/session/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    const data = await res.json();
+    let data;
+    try {
+      data = await this._fetchJson(this.baseUrl + '/session/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }, config.GATEWAY_CREATE_TIMEOUT_MS);
+    } catch (err) {
+      const detail = err.message || String(err);
+      if (/existing browser session|profile is already in use/i.test(detail)) {
+        throw new Error(
+          'Failed to create gateway session: browser profile is locked. '
+          + 'Stop other SeekCode/gateway instances, close the DeepSeek browser window, '
+          + 'then retry. Detail: ' + detail
+        );
+      }
+      throw err;
+    }
     if (data.sessionId) {
       this.sessionId = data.sessionId;
       // Store gateway session log path so callers can record it for debugging
@@ -32,7 +77,15 @@ class GatewayClient {
         logger.dim('Gateway session log: ' + this.sessionLogPath);
       }
     } else {
-      throw new Error('Failed to create gateway session');
+      const detail = data.error || 'unknown error';
+      if (/existing browser session|profile is already in use/i.test(detail)) {
+        throw new Error(
+          'Failed to create gateway session: browser profile is locked. '
+          + 'Stop other SeekCode/gateway instances, close the DeepSeek browser window, '
+          + 'then retry. Detail: ' + detail
+        );
+      }
+      throw new Error('Failed to create gateway session: ' + detail);
     }
     return data; // return full response so callers get sessionLogPath etc.
   }
@@ -50,18 +103,13 @@ class GatewayClient {
     }, 80);
 
     try {
-      const res = await fetch(this.baseUrl + '/session/' + this.sessionId + '/chat', {
+      const data = await this._fetchJson(this.baseUrl + '/session/' + this.sessionId + '/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt, tab, model, readOnly: effectiveReadOnly })
-      });
+      }, config.GATEWAY_REQUEST_TIMEOUT_MS);
       clearInterval(interval);
       process.stdout.write('\r' + ' '.repeat(40) + '\r');
-      if (!res.ok) {
-        const error = await res.text();
-        throw new Error('Gateway error ' + res.status + ': ' + error);
-      }
-      const data = await res.json();
       return data.text;
     } catch (err) {
       clearInterval(interval);
@@ -72,7 +120,11 @@ class GatewayClient {
 
   async closeSession() {
     if (this.sessionId) {
-      await fetch(this.baseUrl + '/session/' + this.sessionId + '/close', { method: 'POST' });
+      try {
+        await this._fetchJson(this.baseUrl + '/session/' + this.sessionId + '/close', { method: 'POST' }, 30000);
+      } catch (err) {
+        logger.warn('Gateway session close failed: ' + err.message);
+      }
       logger.info('Gateway session closed');
       this.sessionId = null;
       this.sessionLogPath = null;

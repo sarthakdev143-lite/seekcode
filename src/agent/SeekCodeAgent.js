@@ -11,6 +11,7 @@ const logger = require('../logger');
 const { ProjectMemory } = require('../session/ProjectMemory');
 const { WorkLog } = require('../session/WorkLog');
 const { SituationReport } = require('../session/SituationReport');
+const { setProjectPath } = require('./tools');
 
 let TraceLogger = null;
 try { TraceLogger = require('../trace-logger').TraceLogger; } catch { }
@@ -18,6 +19,7 @@ try { TraceLogger = require('../trace-logger').TraceLogger; } catch { }
 class SeekCodeAgent {
   constructor(projectPath) {
     this.projectPath = projectPath;
+    setProjectPath(projectPath);
     this.gateway = new GatewayClient(this.projectPath);
     this.analyzer = null;
     this.conversationHistory = [];
@@ -188,27 +190,23 @@ class SeekCodeAgent {
   }
 
   async _handleMultiStep(input, agenticBase) {
-    const summary = this.analyzer.getSummary();
-    const context = this.contextManager.buildContextForLLM({ maxRecentTurns: 4 });
-    const prompt = [
-      agenticBase,
-      '',
-      'USER TASK: ' + input,
-      '',
-      'PROJECT CONTEXT:',
-      JSON.stringify(summary, null, 2),
-      context ? '\nRECENT CONVERSATION:\n' + context : '',
-      '',
-      'Approach:',
-      '1. Research and state your plan.',
-      '2. Execute using surgical tools.',
-      '3. Validate and summarize.'
-    ].join('\n');
     this.contextManager.addMessage('user', input);
-    const response = await this._callLLMWithTrace(prompt, '_handleMultiStep');
-    this.contextManager.addMessage('assistant', response);
-    this._addToHistory('assistant', response);
-    return response;
+    logger.info('Multi-step task detected — routing to full orchestrator pipeline.');
+
+    const { EnhancedOrchestrator } = require('../orchestrator/EnhancedOrchestrator');
+    const orchestrator = new EnhancedOrchestrator(this.projectPath);
+
+    try {
+      await orchestrator.init();
+      const result = await orchestrator.run(input, {});
+      this.contextManager.addMessage('assistant', result);
+      this._addToHistory('assistant', result);
+      await this.analyzer.analyze();
+      return result;
+    } catch (err) {
+      logger.error(`Orchestrator failed: ${err.message}`);
+      throw err;
+    }
   }
 
   async _handleChat(input, agenticBase) {

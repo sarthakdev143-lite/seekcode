@@ -165,6 +165,10 @@ class EnhancedOrchestrator {
         this._updateTopic('Resuming', `Continuing previously interrupted task: ${pendingTaskId}`);
         logger.info(`Resuming task: ${pendingTaskId}`);
         this.taskManager = new TaskManager(this.projectPath, pendingTaskId);
+        if (this.taskManager.state.taskDescription) {
+          task = this.taskManager.state.taskDescription;
+          this.contextManager.setTask(task);
+        }
         plan = { steps: this.taskManager.state.steps.map(s => s.description) };
         this._log('plan_resumed', { taskId: pendingTaskId, steps: plan.steps });
       } else {
@@ -180,7 +184,7 @@ class EnhancedOrchestrator {
         }
 
         this.taskManager = new TaskManager(this.projectPath);
-        this.taskManager.setPlan(plan.steps);
+        this.taskManager.setPlan(plan.steps, task);
       }
 
       // FEATURE 5: Plan Mode (Speculative Design)
@@ -195,6 +199,18 @@ class EnhancedOrchestrator {
 
       this.journal = new ExecutionJournal(this.projectPath, this.taskManager.taskId);
       this.checkpoints = new CheckpointManager(this.projectPath, this.taskManager.taskId);
+
+      if (pendingTaskId && options.restoreCheckpoint !== false) {
+        const restored = this.checkpoints.restoreLatest(this.taskManager.taskId);
+        if (restored) {
+          logger.info(`Restored workspace from checkpoint: ${restored.id} (${restored.reason})`);
+          this._log('checkpoint_restored', { checkpointId: restored.id, reason: restored.reason });
+          await this.analyzer.analyze();
+          this.repositoryMap.build();
+          this.semanticSearch.refresh();
+        }
+      }
+
       this.validatorAgent = new ValidatorAgent(this.validator, this.metrics, this.journal, this.traceLogger);
       this.repairAgent = new RepairAgent(this.gateway, this.validatorAgent, {
         journal: this.journal,
@@ -221,7 +237,7 @@ class EnhancedOrchestrator {
         this._log('parallel_execution_failed', { error: err.message });
         const remainingTask = `The previous parallel execution failed. Error: ${err.message}. Please provide a recovery plan to complete the task: ${task}`;
         const newPlan = await this.plannerAgent.plan(remainingTask);
-        this.taskManager.setPlan(newPlan.steps);
+        this.taskManager.setPlan(newPlan.steps, task);
         for (let i = 0; i < newPlan.steps.length; i++) {
           this._updateTopic(`Recovery Step ${i+1}/${newPlan.steps.length}`, newPlan.steps[i]);
           this._renderProgressBar(i + 1, newPlan.steps.length, newPlan.steps[i]);

@@ -116,6 +116,38 @@ class CheckpointManager {
     };
     walk(this.projectDir);
   }
+
+  /** List checkpoint metadata, newest first. */
+  listCheckpoints(taskId = this.taskId) {
+    const fs = require('fs');
+    if (!fs.existsSync(this.dir)) return [];
+
+    return fs.readdirSync(this.dir)
+      .filter(f => f.endsWith('.json'))
+      .map(f => {
+        try {
+          const meta = JSON.parse(fs.readFileSync(path.join(this.dir, f), 'utf8'));
+          const backupDir = path.join(this.dir, meta.id);
+          return fs.existsSync(backupDir) ? meta : null;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .filter(cp => !taskId || cp.taskId === taskId)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }
+
+  findLatest(taskId = this.taskId) {
+    return this.listCheckpoints(taskId)[0] || null;
+  }
+
+  restoreLatest(taskId = this.taskId) {
+    const latest = this.findLatest(taskId);
+    if (!latest) return null;
+    this.restore(latest.id);
+    return latest;
+  }
 }
 
 module.exports = { CheckpointManager };

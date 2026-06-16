@@ -2,6 +2,7 @@ const { program } = require('commander');
 const { analyzeCommand } = require('./commands/analyze');
 const { planCommand } = require('./commands/plan');
 const { runCommand } = require('./commands/run');
+const { resumeCommand } = require('./commands/resume');
 const { benchmarkCommand } = require('./commands/benchmark');
 const { logsCommand } = require('./commands/logs');
 
@@ -35,6 +36,18 @@ program
     if (!task) { console.error('Error: task argument required'); process.exit(1); }
     if (options.port) options.port = parseInt(options.port, 10);
     await runCommand(project, task, options);
+  });
+
+program
+  .command('resume [project]')
+  .description('Resume an interrupted task and restore the latest workspace checkpoint')
+  .option('--no-restore', 'Resume task plan without restoring workspace files')
+  .option('--list-checkpoints', 'List available checkpoints for the interrupted task')
+  .option('--port <number>', 'Port for runtime health validation')
+  .option('--start-command <command>', 'Command to start the server for health check')
+  .action(async (project, options) => {
+    if (options.port) options.port = parseInt(options.port, 10);
+    await resumeCommand(project, options);
   });
 
 program

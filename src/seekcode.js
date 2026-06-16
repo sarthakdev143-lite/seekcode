@@ -8,6 +8,7 @@ const logger = require('./logger');
 const { analyzeCommand } = require('./commands/analyze');
 const { planCommand } = require('./commands/plan');
 const { runCommand } = require('./commands/run');
+const { resumeCommand } = require('./commands/resume');
 const { benchmarkCommand } = require('./commands/benchmark');
 const { logsCommand } = require('./commands/logs');
 const { ProjectAnalyzer } = require('./analyzer/ProjectAnalyzer');
@@ -40,6 +41,7 @@ function setupCrashHandler() {
     if (crashFile) {
       logger.info(`Crash report saved to: ${crashFile}`);
     }
+    logger.info('To resume an interrupted task: seekcode resume');
     process.exit(1);
   };
 
@@ -158,6 +160,24 @@ program
       await runCommand(project, task, options);
     } finally {
       // Keep gateway running for subsequent commands, or stop? 
+    }
+  });
+
+program
+  .command('resume [project]')
+  .description('Resume an interrupted task and restore the latest workspace checkpoint')
+  .option('--no-restore', 'Resume task plan without restoring workspace files')
+  .option('--list-checkpoints', 'List available checkpoints for the interrupted task')
+  .option('--port <number>', 'Port for runtime health validation')
+  .option('--start-command <command>', 'Command to start the server for health check')
+  .action(async (project, options) => {
+    const gatewayReady = await startGatewayIfNeeded();
+    if (!gatewayReady) process.exit(1);
+    try {
+      if (options.port) options.port = parseInt(options.port, 10);
+      await resumeCommand(project, options);
+    } finally {
+      // Keep gateway running for subsequent commands
     }
   });
 

@@ -21,7 +21,7 @@ class ParallelStepExecutor {
     const totalSteps = steps.length;
     const results = new Array(totalSteps).fill(null);
     const completed = new Set();
-    const running = new Set();
+    const running = new Map();
 
     // Steps may be plain strings (rule-based plan) or annotated objects
     // { description, reads, writes } from the Option-B annotation pass.
@@ -82,10 +82,14 @@ class ParallelStepExecutor {
     //   ≤ 8 steps       → max 3 tabs
     //   > 8 steps       → max 5 tabs
     let MAX_CONCURRENT;
-    if (totalSteps === 1)      MAX_CONCURRENT = 1;
-    else if (totalSteps <= 4)  MAX_CONCURRENT = 2;
-    else if (totalSteps <= 8)  MAX_CONCURRENT = 3;
-    else                       MAX_CONCURRENT = MAX_PARALLEL_TABS; // 5
+    if (process.env.SEEKCODE_PARALLEL === '1') {
+      if (totalSteps === 1)      MAX_CONCURRENT = 1;
+      else if (totalSteps <= 4)  MAX_CONCURRENT = 2;
+      else if (totalSteps <= 8)  MAX_CONCURRENT = 3;
+      else                       MAX_CONCURRENT = MAX_PARALLEL_TABS;
+    } else {
+      MAX_CONCURRENT = 1;
+    }
 
     const tabAssignment = new Map(); // stepIndex -> tabName string
 
@@ -129,30 +133,25 @@ class ParallelStepExecutor {
       const stepsToStart = readySteps.slice(0, limit);
 
       if (stepsToStart.length > 0) {
-        const promises = stepsToStart.map(async i => {
-          running.add(i);
-          
-          // Allocate a dedicated tab for this step
-          const tabName = `step-tab-${i + 1}`;
+        for (const i of stepsToStart) {
+          const tabName = MAX_CONCURRENT === 1 ? 'step-tab-main' : `step-tab-${i + 1}`;
           tabAssignment.set(i, tabName);
-          
-          try {
-            await runStep(i, tabName);
-          } catch (err) {
-            logger.error(`Error running step ${i + 1} on parallel tab: ${err.message}`);
-            throw err;
-          } finally {
-            running.delete(i);
-            completed.add(i);
-          }
-        });
-        
-        // Wait for at least one running step to finish before polling again
-        await Promise.race(promises).catch(() => {});
-      } else {
-        // Just wait a moment for running tasks to complete
-        await new Promise(r => setTimeout(r, 1000));
+          const promise = runStep(i, tabName)
+            .then(() => ({ i, ok: true }))
+            .catch(err => ({ i, ok: false, err }));
+          running.set(i, promise);
+        }
       }
+
+      if (running.size === 0) continue;
+
+      const settled = await Promise.race(Array.from(running.values()));
+      running.delete(settled.i);
+      if (!settled.ok) {
+        logger.error(`Error running step ${settled.i + 1}: ${settled.err.message}`);
+        throw settled.err;
+      }
+      completed.add(settled.i);
     }
 
     async function runStep(i, tabName) {

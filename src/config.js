@@ -1,6 +1,8 @@
 ﻿const path = require('path');
 module.exports = {
   GATEWAY_URL: process.env.GATEWAY_URL || 'http://localhost:8080',
+  GATEWAY_CREATE_TIMEOUT_MS: Number(process.env.GATEWAY_CREATE_TIMEOUT_MS || 120000),
+  GATEWAY_REQUEST_TIMEOUT_MS: Number(process.env.GATEWAY_REQUEST_TIMEOUT_MS || 35 * 60 * 1000),
   WORKING_DIR: process.cwd(),
   CACHE_DIR: path.join(process.cwd(), '.seekcode', 'cache'),
   SUPPORTED_EXTENSIONS: ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'],

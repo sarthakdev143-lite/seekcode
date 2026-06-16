@@ -12,6 +12,7 @@ class TaskManager {
     this.lastActiveFile = path.join(this.projectDir, '.seekcode', 'last-active-task.json');
     this.state = {
       taskId: this.taskId,
+      taskDescription: null,
       status: 'pending',
       steps: [],
       currentStepIndex: -1,
@@ -50,7 +51,8 @@ class TaskManager {
     }
   }
 
-  setPlan(steps) {
+  setPlan(steps, taskDescription = null) {
+    if (taskDescription) this.state.taskDescription = taskDescription;
     this.state.steps = steps.map((s, index) => ({
       id: index,
       description: s,
