@@ -12,8 +12,61 @@ export interface ChatResponse {
   toolCalls?: any[];
 }
 
+export interface HealthResponse {
+  status: 'ok' | 'degraded' | 'unhealthy';
+  version: string;
+  sessions: {
+    activeSessions: number;
+    maxSessions: number;
+    sessionTTL: number;
+  };
+  timestamp: string;
+}
+
+export interface TaskOptions {
+  tab?: string;
+  model?: string;
+  readOnly?: boolean;
+  workingDir?: string;
+}
+
+export interface TaskResponse {
+  taskId: string;
+  status: 'created' | 'running' | 'complete' | 'error';
+  result?: string;
+  sessionLogPath?: string;
+}
+
+export interface TaskStatus {
+  taskId: string;
+  status: 'ready' | 'running' | 'complete' | 'error' | 'closed';
+  createdAt?: string;
+  lastAccessed?: string;
+  hasLogs: boolean;
+  logPath?: string;
+}
+
+export interface SessionInfo {
+  id: string;
+  metadata: {
+    createdAt?: string;
+    workingDir?: string;
+    lastAccessed?: string;
+  };
+}
+
+export interface SessionListResponse {
+  stats: {
+    activeSessions: number;
+    maxSessions: number;
+    sessionTTL: number;
+  };
+  sessions: SessionInfo[];
+}
+
 export class SeekCodeClient {
   private sessionId: string | null = null;
+  private sessionLogPath: string | null = null;
 
   async createSession(workingDir?: string): Promise<SessionResponse> {
     const res = await fetch(`${API_BASE}/session/create`, {
@@ -27,6 +80,7 @@ export class SeekCodeClient {
     }
     const data = await res.json();
     this.sessionId = data.sessionId;
+    this.sessionLogPath = data.sessionLogPath || null;
     return data;
   }
 
@@ -53,16 +107,91 @@ export class SeekCodeClient {
       });
     } finally {
       this.sessionId = null;
+      this.sessionLogPath = null;
     }
   }
 
-  async health(): Promise<any> {
+  async healthCheck(): Promise<HealthResponse> {
     const res = await fetch(`${API_BASE}/health`);
+    if (!res.ok) throw new Error('Health check failed');
     return res.json();
   }
 
-  async listSessions(): Promise<any> {
+  async listSessions(): Promise<SessionListResponse> {
     const res = await fetch(`${API_BASE}/sessions`);
+    if (!res.ok) throw new Error('Failed to list sessions');
+    return res.json();
+  }
+
+  async getTaskStatus(taskId: string): Promise<TaskStatus | null> {
+    const { sessions } = await this.listSessions();
+    const found = sessions.find(s => s.id === taskId);
+    if (!found) return null;
+    return {
+      taskId: found.id,
+      status: 'ready',
+      createdAt: found.metadata?.createdAt,
+      lastAccessed: found.metadata?.lastAccessed,
+      hasLogs: true,
+      logPath: found.metadata?.workingDir,
+    };
+  }
+
+  async createTask(prompt: string, options?: TaskOptions): Promise<TaskResponse> {
+    if (!this.sessionId) {
+      await this.createSession(options?.workingDir);
+    }
+    try {
+      const result = await this.chat(prompt, {
+        tab: options?.tab,
+        model: options?.model,
+        readOnly: options?.readOnly,
+      });
+      return {
+        taskId: this.sessionId!,
+        status: 'complete',
+        result,
+        sessionLogPath: this.sessionLogPath || undefined,
+      };
+    } catch (error) {
+      return {
+        taskId: this.sessionId!,
+        status: 'error',
+        sessionLogPath: this.sessionLogPath || undefined,
+      };
+    }
+  }
+
+  async getSessionLogs(): Promise<string | null> {
+    if (!this.sessionLogPath) return null;
+    try {
+      const res = await fetch(this.sessionLogPath);
+      if (!res.ok) return null;
+      return res.text();
+    } catch {
+      return null;
+    }
+  }
+
+  async diagnose(tab?: string): Promise<any> {
+    if (!this.sessionId) throw new Error('No active session');
+    const res = await fetch(`${API_BASE}/session/${this.sessionId}/diagnose`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tab }),
+    });
+    if (!res.ok) throw new Error('Diagnose failed');
+    return res.json();
+  }
+
+  async recreateTab(tab?: string): Promise<any> {
+    if (!this.sessionId) throw new Error('No active session');
+    const res = await fetch(`${API_BASE}/session/${this.sessionId}/tab/recreate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tab }),
+    });
+    if (!res.ok) throw new Error('Tab recreation failed');
     return res.json();
   }
 }
