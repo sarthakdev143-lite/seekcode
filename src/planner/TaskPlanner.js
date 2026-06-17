@@ -34,7 +34,7 @@ class TaskPlanner {
         'If not, create a README.md with project name, description, installation, and usage',
         'Add the README to git and commit'
       ];
-      return { task: taskDescription, steps };
+      return this._finalizePlan(taskDescription, steps);
     }
 
     // Git / GitHub tasks
@@ -46,7 +46,7 @@ class TaskPlanner {
         'If a remote URL is provided, add it; otherwise ask the user for the GitHub repo URL',
         'Push to the remote repository'
       ];
-      return { task: taskDescription, steps };
+      return this._finalizePlan(taskDescription, steps);
     }
 
     // Package / dependency tasks
@@ -56,7 +56,7 @@ class TaskPlanner {
         'Run npm install or add new packages as specified',
         'Verify installation by importing a package'
       ];
-      return { task: taskDescription, steps };
+      return this._finalizePlan(taskDescription, steps);
     }
 
     // ---- Fallback: LLM or rule-based ----
@@ -85,7 +85,9 @@ class TaskPlanner {
       '- Each milestone should have atomic steps.',
       '- Include validation steps (run tests, build) after each major milestone.',
       '',
-      'Output ONLY a JSON object: {"steps": ["step1", "step2", ...]}.',
+      'Output ONLY a JSON object with this shape:',
+      '{"steps":[{"description":"...","inspect":["file"],"change":["file"],"reads":["file"],"writes":["file"],"dependsOn":[0]}],"validationCommand":"npm test","rollbackRisk":"low|medium|high"}.',
+      'Every step must include files to inspect, likely files to change, validation needs, rollback risk, and dependency ordering where applicable.',
       '',
       'PROJECT CONTEXT:',
       context,
@@ -112,10 +114,10 @@ class TaskPlanner {
     } catch (e) {
       logger.warn(`[Planner] Annotation pass failed (${e.message}). Falling back to raw step list.`);
       // Fallback: wrap raw strings in the expected shape
-      annotatedSteps = steps.map(s => ({ description: s, reads: [], writes: [] }));
+      annotatedSteps = steps.map(s => typeof s === 'string' ? { description: s, reads: [], writes: [] } : s);
     }
 
-    return { task, steps: annotatedSteps };
+    return this._finalizePlan(task, annotatedSteps, rawPlan);
   }
 
   /**
@@ -184,11 +186,17 @@ class TaskPlanner {
       );
     }
 
-    return annotated.map((item, i) => ({
-      description: item.description || steps[i],
-      reads:  Array.isArray(item.reads)  ? item.reads  : [],
-      writes: Array.isArray(item.writes) ? item.writes : [],
-    }));
+    return annotated.map((item, i) => {
+      const original = typeof steps[i] === 'string' ? { description: steps[i] } : steps[i];
+      return {
+        ...original,
+        description: item.description || original.description,
+        inspect: Array.isArray(original.inspect) ? original.inspect : [],
+        change: Array.isArray(original.change) ? original.change : [],
+        reads:  Array.isArray(item.reads)  ? item.reads  : (Array.isArray(original.reads) ? original.reads : []),
+        writes: Array.isArray(item.writes) ? item.writes : (Array.isArray(original.writes) ? original.writes : []),
+      };
+    });
   }
 
   // -- Rule-based (original) --
@@ -203,9 +211,50 @@ class TaskPlanner {
     ];
     for (const p of patterns) {
       const m = task.match(p.match);
-      if (m) return { task, steps: p.handler(m) };
+      if (m) return this._finalizePlan(task, p.handler(m));
     }
-    return { task, steps: this._genericPlan(task) };
+    return this._finalizePlan(task, this._genericPlan(task));
+  }
+
+  _finalizePlan(task, steps, raw = {}) {
+    const normalized = (steps || []).map((step, index) => {
+      const obj = typeof step === 'string' ? { description: step } : { ...step };
+      return {
+        description: obj.description || String(step),
+        inspect: Array.isArray(obj.inspect) ? obj.inspect : (Array.isArray(obj.reads) ? obj.reads : []),
+        change: Array.isArray(obj.change) ? obj.change : (Array.isArray(obj.writes) ? obj.writes : []),
+        reads: Array.isArray(obj.reads) ? obj.reads : [],
+        writes: Array.isArray(obj.writes) ? obj.writes : [],
+        dependsOn: Array.isArray(obj.dependsOn) ? obj.dependsOn : [],
+        order: index,
+      };
+    });
+    return {
+      task,
+      steps: normalized,
+      filesToInspect: [...new Set(normalized.flatMap(s => [...s.inspect, ...s.reads]))],
+      filesLikelyToChange: [...new Set(normalized.flatMap(s => [...s.change, ...s.writes]))],
+      validationCommand: raw.validationCommand || this._detectValidationCommand(),
+      rollbackRisk: raw.rollbackRisk || this._estimateRollbackRisk(normalized),
+      dependencyOrdering: normalized.map(s => ({ step: s.order, dependsOn: s.dependsOn })),
+      quickAnswer: raw.quickAnswer,
+      relatedFiles: raw.relatedFiles,
+    };
+  }
+
+  _detectValidationCommand() {
+    if (this.meta?.scripts?.test) return 'npm test';
+    if (this.meta?.scripts?.build) return 'npm run build';
+    if (this.meta?.scripts?.analyze) return 'npm run analyze';
+    if (this.graph.getAllFiles().some(f => f.endsWith('.js'))) return 'node -c <changed-js-file>';
+    return null;
+  }
+
+  _estimateRollbackRisk(steps) {
+    const writes = steps.flatMap(s => [...(s.writes || []), ...(s.change || [])]);
+    if (writes.some(f => /package-lock|schema|migration|database|auth/i.test(f))) return 'high';
+    if (writes.length > 5) return 'medium';
+    return 'low';
   }
 
   _planAddTypeScript() {

@@ -14,13 +14,17 @@
     "analyze": "node src/analyze.js",
     "semantic-search": "node src/semantic-search.js",
     "start": "node src/index.js",
-    "prepublishOnly": "node src/analyze.js . && echo '✅ Pre-publish checks passed'"
+    "agent:evaluate": "node src/seekcode.js benchmark run . --agent",
+    "prepublishOnly": "node src/analyze.js . && echo '✅ Pre-publish checks passed'",
+    "gui": "node gui/server.js"
   },
   "dependencies": {
     "chalk": "^4.1.2",
     "commander": "^15.0.0",
+    "cors": "^2.8.6",
     "deepseek-web-gateway": "^1.0.0",
     "enquirer": "^2.4.1",
+    "express": "^4.22.2",
     "fast-glob": "^3.3.2",
     "ignore": "^5.3.1",
     "marked": "^15.0.12",

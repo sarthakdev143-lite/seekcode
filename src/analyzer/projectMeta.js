@@ -6,6 +6,7 @@ function detectProjectMeta(rootDir) {
   if (fs.existsSync(pkgPath)) {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
     const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    meta.scripts = pkg.scripts || {};
     if (deps.next) meta.framework = 'Next.js';
     else if (deps.react) meta.framework = 'React';
     else if (deps.vue) meta.framework = 'Vue';

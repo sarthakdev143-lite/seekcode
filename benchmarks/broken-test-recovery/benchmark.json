@@ -1,0 +1,8 @@
+{
+  "id": "broken-test-recovery",
+  "task": "Fix the broken test by correcting the implementation, not by weakening the test.",
+  "validationCommands": { "build": "node -c calculator.js", "test": "node validate.js" },
+  "expectedOutputs": [
+    { "file": "calculator.js", "contains": "return a - b;" }
+  ]
+}

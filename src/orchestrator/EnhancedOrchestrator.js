@@ -33,6 +33,10 @@ const { WorkLog } = require('../session/WorkLog');
 const { SituationReport } = require('../session/SituationReport');
 const { ContextManager } = require('../context/ContextManager');
 const { ParallelStepExecutor } = require('./ParallelStepExecutor');
+const { TaskStateMachine, STATES } = require('./TaskStateMachine');
+const { DeterministicToolbox } = require('./DeterministicToolbox');
+const { StallDetector } = require('./StallDetector');
+const { FailureReporter } = require('./FailureReporter');
 const config = require('../config');
 
 let TraceLogger = null;
@@ -73,6 +77,7 @@ class EnhancedOrchestrator {
   /** Convenience — log an event without guards everywhere */
   _log(event, data = {}) {
     if (this.traceLogger) this.traceLogger.logEvent(event, data);
+    this.taskManager?.recordActivity?.('trace-event', { event }, false);
   }
 
   /**
@@ -80,6 +85,7 @@ class EnhancedOrchestrator {
    * e.g.  [█████░░░░░] 50%  Step 3/6: Write server routes
    */
   _renderProgressBar(current, total, label = '') {
+    label = this._stepText(label);
     const width  = Math.min(40, (process.stdout.columns || 80) - 30);
     const pct    = total > 0 ? Math.round((current / total) * 100) : 0;
     const filled = Math.round((pct / 100) * width);
@@ -100,6 +106,7 @@ class EnhancedOrchestrator {
     this.testRunner = new TestRunner(this.projectPath);
     this.gitManager = new GitManager(this.projectPath);
     this.validator = new ValidationEngine(this.projectPath);
+    this.deterministicTools = new DeterministicToolbox(this.projectPath, this.analyzer, this.validator);
     this.selfHealing = new SelfHealingOrchestrator(this.projectPath);
     this.errorMemory = new ErrorMemory(this.projectPath, this.validator);
     this.metrics = new MetricsCollector(this.projectPath);
@@ -120,6 +127,13 @@ class EnhancedOrchestrator {
     logger.success('Enhanced orchestrator initialized');
   }
 
+  _stepText(step) {
+    if (typeof step === 'string') return step;
+    if (step && typeof step.description === 'string') return step.description;
+    if (step == null) return '';
+    try { return JSON.stringify(step); } catch { return String(step); }
+  }
+
   async run(task, options = {}) {
     this.options = options;
     if (options.port) {
@@ -138,7 +152,8 @@ class EnhancedOrchestrator {
     }
 
     const explicitTaskId = process.env.SEEKCODE_TASK_ID || null;
-    const pendingTaskId = TaskManager.findPendingTask(this.projectPath, explicitTaskId);
+    const shouldResume = Boolean(options.resume || explicitTaskId);
+    const pendingTaskId = shouldResume ? TaskManager.findPendingTask(this.projectPath, explicitTaskId) : null;
     const baseContext = this._baseContext();
     let plan;
     const runStart = Date.now();
@@ -165,15 +180,29 @@ class EnhancedOrchestrator {
         this._updateTopic('Resuming', `Continuing previously interrupted task: ${pendingTaskId}`);
         logger.info(`Resuming task: ${pendingTaskId}`);
         this.taskManager = new TaskManager(this.projectPath, pendingTaskId);
+        this.stateMachine = new TaskStateMachine(this.taskManager, { traceLogger: this.traceLogger });
         if (this.taskManager.state.taskDescription) {
           task = this.taskManager.state.taskDescription;
           this.contextManager.setTask(task);
         }
-        plan = { steps: this.taskManager.state.steps.map(s => s.description) };
+        plan = { steps: this.taskManager.state.steps.map(s => ({
+          description: this._stepText(s.description),
+          reads: Array.isArray(s.reads) ? s.reads : [],
+          writes: Array.isArray(s.writes) ? s.writes : [],
+        })) };
         this._log('plan_resumed', { taskId: pendingTaskId, steps: plan.steps });
       } else {
+        this.taskManager = new TaskManager(this.projectPath);
+        this.stateMachine = new TaskStateMachine(this.taskManager, { traceLogger: this.traceLogger });
+        this.stateMachine.transition(STATES.PLANNING, { task });
         this._updateTopic('Planning', 'Generating strategic execution plan and semantic mapping');
         this._log('plan_start', { task });
+        const planEvidence = this.deterministicTools.collectPlanEvidence(task);
+        this._log('deterministic_plan_evidence', {
+          rgAvailable: planEvidence.rgAvailable,
+          scripts: Object.keys(planEvidence.scripts || {}),
+          detectedCommands: planEvidence.detectedCommands,
+        });
         plan = await this.plannerAgent.plan(task);
         this._log('plan_created', { steps: plan.steps, relatedFiles: plan.relatedFiles, quickAnswer: !!plan.quickAnswer });
 
@@ -183,7 +212,18 @@ class EnhancedOrchestrator {
           return answer;
         }
 
-        this.taskManager = new TaskManager(this.projectPath);
+        const planValidation = this.deterministicTools.validatePlan(plan);
+        if (!planValidation.success) {
+          throw new Error(`Plan validation failed: ${planValidation.errors.join('; ')}`);
+        }
+        this._log('plan_validated', {
+          validationCommand: planValidation.validationCommand,
+          filesToInspect: plan.filesToInspect,
+          filesLikelyToChange: plan.filesLikelyToChange,
+          rollbackRisk: plan.rollbackRisk,
+          dependencyOrdering: plan.dependencyOrdering,
+        });
+
         this.taskManager.setPlan(plan.steps, task);
       }
 
@@ -198,6 +238,9 @@ class EnhancedOrchestrator {
       }
 
       this.journal = new ExecutionJournal(this.projectPath, this.taskManager.taskId);
+      this.stateMachine = new TaskStateMachine(this.taskManager, { journal: this.journal, traceLogger: this.traceLogger });
+      this.failureReporter = new FailureReporter(this.projectPath, this.taskManager, this.traceLogger);
+      this.stallDetector = new StallDetector(this, { timeoutMs: options.stallMs });
       this.checkpoints = new CheckpointManager(this.projectPath, this.taskManager.taskId);
 
       if (pendingTaskId && options.restoreCheckpoint !== false) {
@@ -222,15 +265,23 @@ class EnhancedOrchestrator {
       this.journal.record('task-start', { task, plan: plan.steps });
       this.journal.record('confidence-evidence', this._confidenceEvidence(plan));
       if (plan.relatedFiles) this.journal.record('semantic-context', { relatedFiles: plan.relatedFiles });
+      this.journal.record('plan-gates', {
+        filesToInspect: plan.filesToInspect || [],
+        filesLikelyToChange: plan.filesLikelyToChange || [],
+        validationCommand: plan.validationCommand || null,
+        rollbackRisk: plan.rollbackRisk || null,
+        dependencyOrdering: plan.dependencyOrdering || [],
+      });
 
       logger.header(pendingTaskId ? 'Resuming Execution Plan' : 'Execution Plan');
       plan.steps.forEach((s, i) => {
         const status = this.taskManager.state.steps[i]?.status || 'pending';
-        console.log(`  ${i + 1}. [${status}] ${s}`);
+        console.log(`  ${i + 1}. [${status}] ${this._stepText(s)}`);
       });
 
       let finalResult = '';
       try {
+        this.stateMachine.transition(STATES.EXECUTING, { steps: plan.steps.length });
         finalResult = await ParallelStepExecutor.run(this, plan, task);
       } catch (err) {
         logger.warn(`Parallel execution failed: ${err.message}. Attempting sequential recovery/replanning...`);
@@ -239,14 +290,16 @@ class EnhancedOrchestrator {
         const newPlan = await this.plannerAgent.plan(remainingTask);
         this.taskManager.setPlan(newPlan.steps, task);
         for (let i = 0; i < newPlan.steps.length; i++) {
-          this._updateTopic(`Recovery Step ${i+1}/${newPlan.steps.length}`, newPlan.steps[i]);
-          this._renderProgressBar(i + 1, newPlan.steps.length, newPlan.steps[i]);
-          const stepResult = await this._executeStep(i, newPlan.steps[i], newPlan.steps.length, task, this._baseContext(newPlan.steps[i]));
+          const stepText = this._stepText(newPlan.steps[i]);
+          this._updateTopic(`Recovery Step ${i+1}/${newPlan.steps.length}`, stepText);
+          this._renderProgressBar(i + 1, newPlan.steps.length, stepText);
+          const stepResult = await this._executeStep(i, newPlan.steps[i], newPlan.steps.length, task, this._baseContext(stepText));
           finalResult += stepResult;
         }
       }
 
       logger.header('Final Validation');
+      this.stateMachine.transition(STATES.VALIDATING, { source: 'final' });
       let finalValidation = await this.validatorAgent.validate(this._getValidationOptions({ source: 'final' }));
       this._log('validation_final', { success: finalValidation.success, phase: finalValidation.phase, error: finalValidation.error });
       // Persist validation result for future sessions
@@ -295,6 +348,11 @@ class EnhancedOrchestrator {
       }
 
       const allChangedFiles = this.executionLog.flatMap(entry => entry.changedFiles || []);
+      const gateResult = this._reviewGate(plan, allChangedFiles, finalValidation);
+      if (!gateResult.success) {
+        throw new Error(`Review gate rejected changes: ${gateResult.errors.join('; ')}`);
+      }
+      this.stateMachine.transition(STATES.REVIEWING, { changedFiles: Array.from(new Set(allChangedFiles)) });
       const combinedContextForReview = baseContext + '\n\nRECENT CONVERSATION:\n' + this.contextManager.buildContextForLLM();
       let review = finalValidation.success
         ? await this.reviewerAgent.review(task, combinedContextForReview, Array.from(new Set(allChangedFiles)))
@@ -356,9 +414,19 @@ class EnhancedOrchestrator {
         stepsCompleted: this.taskManager.state.steps.filter(s => s.status === 'completed').length,
         totalSteps: plan.steps.length,
       });
+      if (taskOutcome) this.stateMachine.transition(STATES.DONE, { totalDurationMs });
+      else this.stateMachine.fail(new Error(finalValidation.error || (review.findings || []).join('; ') || 'Task did not pass final gates'), { totalDurationMs });
       this.metrics.recordTask(taskOutcome, Date.now() - startTime);
       return finalResult;
     } catch (err) {
+      this.stateMachine?.fail(err, {
+        tracePath: this.traceLogger?.projectLogPath || null,
+        currentStepIndex: this.taskManager?.state?.currentStepIndex,
+      });
+      const failure = this.failureReporter?.write(err, {
+        lastModelResponsePreview: this.executionLog[this.executionLog.length - 1]?.summary || null,
+      });
+      if (failure?.file) logger.error(`Failure report: ${failure.file}`);
       this._log('run_error', { error: err.message, stack: err.stack?.slice(0, 500) });
       this.metrics?.recordTask(false, Date.now() - startTime);
       throw err;
@@ -369,21 +437,22 @@ class EnhancedOrchestrator {
   }
 
   async _executeStep(index, step, totalSteps, task, baseContext) {
+    const stepText = this._stepText(step);
     const stepStart = Date.now();
     const before = this._snapshotWorkspace();
     const stepId = `step_${index + 1}`;
     let changedFiles = [];
 
     this.taskManager.updateStepStatus(index, 'in-progress');
-    logger.header(`Step ${index + 1}/${totalSteps}: ${step.substring(0, 80)}`);
-    this.journal.record('step-start', { index: index + 1, step });
+    logger.header(`Step ${index + 1}/${totalSteps}: ${stepText.substring(0, 80)}`);
+    this.journal.record('step-start', { index: index + 1, step: stepText });
 
     const backup = await this.selfHealing.createBackup(Array.from(before.keys()));
 
     // Refresh scores and cache contents of top relevant files
     if (this.contextManager.fileTracker) {
       const filePaths = this.analyzer.getDependencyGraph().getAllFiles().map(f => path.resolve(this.projectPath, f));
-      this.contextManager.fileTracker.scoreRelevance(`${task} ${step}`, filePaths);
+      this.contextManager.fileTracker.scoreRelevance(`${task} ${stepText}`, filePaths);
       
       const topFiles = this.contextManager.fileTracker.getTopRelevantFiles(5);
       for (const fp of topFiles) {
@@ -399,7 +468,7 @@ class EnhancedOrchestrator {
     }
 
     // ENHANCEMENT: Cognitive Loop (Research -> Strategy -> Execution)
-    const semanticFiles = this.semanticSearch.search(`${task} ${step}`, 8).map(r => ({
+    const semanticFiles = this.semanticSearch.search(`${task} ${stepText}`, 8).map(r => ({
       path: r.path,
       score: Number(r.score.toFixed(3)),
       symbols: r.symbols.slice(0, 8)
@@ -408,8 +477,8 @@ class EnhancedOrchestrator {
     let researchFindings = '';
     try {
       logger.info(`Starting codebase research for step ${index + 1}...`);
-      this._log('research_start', { stepIndex: index + 1, step, semanticFiles: semanticFiles.length });
-      researchFindings = await this.researchAgent.research(task, step, baseContext, semanticFiles, {
+      this._log('research_start', { stepIndex: index + 1, step: stepText, semanticFiles: semanticFiles.length });
+      researchFindings = await this.researchAgent.research(task, stepText, baseContext, semanticFiles, {
         tab: this.options?.tab ? `research-${this.options.tab}` : 'researcher'
       });
       this._log('research_end', { stepIndex: index + 1, findingsLen: researchFindings.length });
@@ -421,7 +490,7 @@ class EnhancedOrchestrator {
     }
 
     // Record step user prompt context
-    const stepPrompt = `Current Step (${index + 1}/${totalSteps}): ${step}\nResearch Findings:\n${researchFindings}`;
+    const stepPrompt = `Current Step (${index + 1}/${totalSteps}): ${stepText}\nResearch Findings:\n${researchFindings}`;
     this.contextManager.addMessage('user', stepPrompt);
     const dynamicConversationContext = this.contextManager.buildContextForLLM();
 
@@ -444,11 +513,14 @@ class EnhancedOrchestrator {
     ].join('\n');
 
     try {
-      const result = await this.selfHealing.executeWithRetry(async () => {
+      const executeOnce = async () => this.selfHealing.executeWithRetry(async () => {
         return await this.executorAgent.execute(prompt, {
           tab: this.options?.tab ? `coder-${this.options.tab}` : 'coder'
         });
-      }, step);
+      }, stepText);
+      const result = this.stallDetector
+        ? await this.stallDetector.runStepWithRecovery({ index: index + 1, step: stepText, tab: this.options?.tab ? `coder-${this.options.tab}` : 'coder' }, executeOnce)
+        : await executeOnce();
 
       // Record assistant executor completion
       this.contextManager.addMessage('assistant', result);
@@ -461,7 +533,7 @@ class EnhancedOrchestrator {
         this.semanticSearch.refresh();
       }
 
-      this.executionLog.push({ index: index + 1, step, summary: result.substring(0, 400), durationMs, changedFiles });
+      this.executionLog.push({ index: index + 1, step: stepText, summary: result.substring(0, 400), durationMs, changedFiles });
       this.executionLog = this.executionLog.slice(-8);
       this.metrics.recordStep(true);
       this.journal.record('step-complete', { index: index + 1, durationMs, changedFiles, result: result.substring(0, 1000) });
@@ -474,7 +546,7 @@ class EnhancedOrchestrator {
 
         if (!validation.success) {
           const combinedRepairContext = baseContext + '\n\nRECENT CONVERSATION:\n' + this.contextManager.buildContextForLLM();
-          const repaired = await this.repairAgent.repair(validation, step, combinedRepairContext, {
+          const repaired = await this.repairAgent.repair(validation, stepText, combinedRepairContext, {
             tab: this.options?.tab ? `repair-${this.options.tab}` : 'repair'
           });
           this._log('repair_step', { stepIndex: index + 1, success: repaired, error: validation.error });
@@ -495,13 +567,13 @@ class EnhancedOrchestrator {
             completedTasks: this.taskManager.state.steps.filter((s, i) => i <= index && s.status === 'completed').map(s => s.description),
             validationStatus: { success: true }
           });
-          this._createGitCheckpoint(task, `Step ${index + 1} complete: ${step}`);
+          this._createGitCheckpoint(task, `Step ${index + 1} complete: ${stepText}`);
         }
       }
 
       this.taskManager.completeStep(index, result);
-      if (this.traceLogger) this.traceLogger.logStep(stepId, step, 'complete', durationMs, { changedFiles });
-      return `Step ${index + 1}: ${step}\n${result}\n\n`;
+      if (this.traceLogger) this.traceLogger.logStep(stepId, stepText, 'complete', durationMs, { changedFiles });
+      return `Step ${index + 1}: ${stepText}\n${result}\n\n`;
     } catch (err) {
       if (this.selfHealing.rollbackStep) {
         const currentChanged = this._diffSnapshot(before, this._snapshotWorkspace());
@@ -513,7 +585,7 @@ class EnhancedOrchestrator {
       this.metrics.recordStep(false);
       this.taskManager.failStep(index, err.message);
       this.journal.record('step-failed', { index: index + 1, durationMs, error: err.message });
-      if (this.traceLogger) this.traceLogger.logStep(stepId, step, 'error', durationMs, { error: err.message });
+      if (this.traceLogger) this.traceLogger.logStep(stepId, stepText, 'error', durationMs, { error: err.message });
       throw err;
     }
   }
@@ -604,7 +676,7 @@ class EnhancedOrchestrator {
       task,
       '',
       'PLAN:',
-      plan.steps.join('\n'),
+      plan.steps.map(s => this._stepText(s)).join('\n'),
       '',
       'Your proposal should include:',
       '1. Impact Analysis: Which files will be changed?',
@@ -671,6 +743,36 @@ class EnhancedOrchestrator {
       semanticIndexFiles: Object.keys(this.repositoryMap?.map?.files || {}).length,
       relatedFilesFound: plan.relatedFiles?.length || 0
     };
+  }
+
+  _reviewGate(plan, changedFiles, validation) {
+    const errors = [];
+    const changed = [...new Set(changedFiles || [])].map(f => f.replace(/\\/g, '/'));
+    const planned = new Set([
+      ...(plan.filesLikelyToChange || []),
+      ...(plan.steps || []).flatMap(s => [
+        ...(Array.isArray(s.writes) ? s.writes : []),
+        ...(Array.isArray(s.change) ? s.change : []),
+      ]),
+    ].filter(Boolean).map(f => f.replace(/\\/g, '/')));
+
+    if (!validation || !Array.isArray(validation.runs) || validation.runs.length === 0) {
+      errors.push('No verification run was recorded.');
+    }
+    if (validation && validation.success !== true) {
+      errors.push(`Verification did not pass (${validation.phase || 'unknown phase'}).`);
+    }
+    if (changed.length > 0 && planned.size > 0) {
+      const unexpected = changed.filter(file => !planned.has(file));
+      if (unexpected.length > 0) {
+        errors.push(`Changed files outside plan: ${unexpected.join(', ')}`);
+      }
+    }
+
+    const result = { success: errors.length === 0, errors, changedFiles: changed, plannedFiles: [...planned] };
+    this.journal?.record('review-gate', result);
+    this._log('review_gate', result);
+    return result;
   }
 
   _createGitCheckpoint(task, label) {

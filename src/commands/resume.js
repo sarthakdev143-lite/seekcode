@@ -70,6 +70,7 @@ async function resumeCommand(projectPath, options = {}) {
   await orchestrator.init();
   const result = await orchestrator.run(task, {
     ...options,
+    resume: true,
     restoreCheckpoint: options.noRestore ? false : true,
   });
 

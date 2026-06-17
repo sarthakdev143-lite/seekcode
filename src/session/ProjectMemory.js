@@ -7,7 +7,7 @@
 const fs   = require('fs');
 const path = require('path');
 
-const MEMORY_VERSION = 2;
+const MEMORY_VERSION = 3;
 
 class ProjectMemory {
   /**
@@ -32,6 +32,7 @@ class ProjectMemory {
       if (fs.existsSync(this.memoryFile)) {
         const raw = JSON.parse(fs.readFileSync(this.memoryFile, 'utf8'));
         if (raw.version === MEMORY_VERSION) return raw;
+        if (raw.version === 2) return this._migrateV2(raw);
       }
     } catch {}
     return this._fresh();
@@ -67,6 +68,25 @@ class ProjectMemory {
 
       // Environment notes (e.g. "missing .env file", "fabric not installed")
       envNotes: [],
+
+      activeTaskState: null,
+      projectFacts: [],
+      pastFailures: [],
+      userPreferences: [],
+      runSummaries: [],
+    };
+  }
+
+  _migrateV2(raw) {
+    return {
+      ...this._fresh(),
+      ...raw,
+      version: MEMORY_VERSION,
+      activeTaskState: null,
+      projectFacts: raw.knownWorking || [],
+      pastFailures: Object.values(raw.errorHistory || {}),
+      userPreferences: [],
+      runSummaries: raw.sessions || [],
     };
   }
 
@@ -86,6 +106,7 @@ class ProjectMemory {
   startSession(sessionId, task) {
     const entry = { id: sessionId, startedAt: new Date().toISOString(), endedAt: null, task, outcome: 'in-progress' };
     this.data.sessions.push(entry);
+    this.data.activeTaskState = { sessionId, task, startedAt: entry.startedAt };
     if (this.data.sessions.length > 100) this.data.sessions = this.data.sessions.slice(-100);
     this._save();
     return entry;
@@ -97,6 +118,9 @@ class ProjectMemory {
       session.endedAt = new Date().toISOString();
       session.outcome = outcome; // 'success' | 'failed' | 'partial'
     }
+    if (this.data.activeTaskState?.sessionId === sessionId) this.data.activeTaskState = null;
+    this.data.runSummaries.push({ sessionId, outcome, endedAt: new Date().toISOString() });
+    this.data.runSummaries = this.data.runSummaries.slice(-100);
     this._save();
   }
 
@@ -156,6 +180,8 @@ class ProjectMemory {
     }
     this.data.errorHistory[fingerprint].count++;
     this.data.errorHistory[fingerprint].lastSeen = new Date().toISOString();
+    this.data.pastFailures.push({ fingerprint, error: errorText.slice(0, 500), at: new Date().toISOString() });
+    this.data.pastFailures = this.data.pastFailures.slice(-100);
     this._save();
   }
 
@@ -200,6 +226,11 @@ class ProjectMemory {
   getRecentSessions(limit = 5) { return this.data.sessions.slice(-limit); }
   getEnvNotes()       { return this.data.envNotes; }
   getLastKnownPort()  { return this.data.lastKnownPort; }
+  getActiveTaskState({ allowResume = false } = {}) { return allowResume ? this.data.activeTaskState : null; }
+  getProjectFacts() { return this.data.projectFacts || []; }
+  getPastFailures(limit = 10) { return (this.data.pastFailures || []).slice(-limit); }
+  getUserPreferences() { return this.data.userPreferences || []; }
+  getRunSummaries(limit = 5) { return (this.data.runSummaries || []).slice(-limit); }
 }
 
 module.exports = { ProjectMemory };

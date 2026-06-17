@@ -14,6 +14,10 @@ class TaskManager {
       taskId: this.taskId,
       taskDescription: null,
       status: 'pending',
+      phase: 'pending',
+      transitions: [],
+      lastProgressAt: Date.now(),
+      activity: [],
       steps: [],
       currentStepIndex: -1,
       startTime: Date.now(),
@@ -32,10 +36,33 @@ class TaskManager {
     if (fs.existsSync(this.stateFile)) {
       try {
         this.state = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
+        this.state.phase = this.state.phase || (this.state.status === 'completed' ? 'done' : this.state.status === 'failed' ? 'failed' : 'pending');
+        this.state.transitions = Array.isArray(this.state.transitions) ? this.state.transitions : [];
+        this.state.activity = Array.isArray(this.state.activity) ? this.state.activity : [];
+        this.state.lastProgressAt = this.state.lastProgressAt || Date.now();
+        this._normalizeLoadedSteps();
       } catch (err) {
         logger.warn(`Failed to load task state: ${err.message}`);
       }
     }
+  }
+
+  _normalizeLoadedSteps() {
+    if (!Array.isArray(this.state.steps)) return;
+    this.state.steps = this.state.steps.map((step, index) => {
+      const rawDescription = step.description ?? step;
+      const metadata = rawDescription && typeof rawDescription === 'object' ? rawDescription : step;
+      return {
+        ...step,
+        id: step.id ?? index,
+        description: typeof rawDescription === 'string'
+          ? rawDescription
+          : (rawDescription?.description || String(rawDescription)),
+        reads: Array.isArray(step.reads) ? step.reads : (Array.isArray(metadata?.reads) ? metadata.reads : []),
+        writes: Array.isArray(step.writes) ? step.writes : (Array.isArray(metadata?.writes) ? metadata.writes : []),
+      };
+    });
+    this.save();
   }
 
   save() {
@@ -55,7 +82,9 @@ class TaskManager {
     if (taskDescription) this.state.taskDescription = taskDescription;
     this.state.steps = steps.map((s, index) => ({
       id: index,
-      description: s,
+      description: typeof s === 'string' ? s : (s?.description || String(s)),
+      reads: Array.isArray(s?.reads) ? s.reads : [],
+      writes: Array.isArray(s?.writes) ? s.writes : [],
       status: 'pending',
       result: null,
       startTime: null,
@@ -63,8 +92,35 @@ class TaskManager {
       error: null
     }));
     this.state.status = 'in-progress';
+    this.state.phase = 'planning';
     this.state.currentStepIndex = 0;
+    this.recordActivity('plan-set', { steps: this.state.steps.length }, false);
     this.save();
+  }
+
+  recordTransition(entry) {
+    this.state.phase = entry.to;
+    this.state.transitions = Array.isArray(this.state.transitions) ? this.state.transitions : [];
+    this.state.transitions.push(entry);
+    this.recordActivity('state-transition', entry, false);
+    if (entry.to === 'done') {
+      this.state.status = 'completed';
+      this.state.endTime = Date.now();
+    }
+    if (entry.to === 'failed') {
+      this.state.status = 'failed';
+      this.state.endTime = Date.now();
+      this.state.error = entry.error || this.state.error;
+    }
+    this.save();
+  }
+
+  recordActivity(type, data = {}, save = true) {
+    this.state.lastProgressAt = Date.now();
+    this.state.activity = Array.isArray(this.state.activity) ? this.state.activity : [];
+    this.state.activity.push({ at: new Date().toISOString(), type, ...data });
+    this.state.activity = this.state.activity.slice(-100);
+    if (save) this.save();
   }
 
   getCurrentStep() {
@@ -82,6 +138,7 @@ class TaskManager {
       if (status === 'completed' || status === 'failed') step.endTime = Date.now();
       if (result) step.result = result;
       if (error) step.error = error;
+      this.recordActivity('step-status', { index, status, error }, false);
       this.save();
     }
   }
@@ -91,6 +148,7 @@ class TaskManager {
     this.state.currentStepIndex = index + 1;
     if (this.state.currentStepIndex >= this.state.steps.length) {
       this.state.status = 'completed';
+      this.state.phase = 'validating';
       this.state.endTime = Date.now();
     }
     this.save();
@@ -99,6 +157,7 @@ class TaskManager {
   failStep(index, error) {
     this.updateStepStatus(index, 'failed', null, error);
     this.state.status = 'failed';
+    this.state.phase = 'failed';
     this.state.endTime = Date.now();
     this.save();
   }

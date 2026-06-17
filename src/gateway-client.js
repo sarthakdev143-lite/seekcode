@@ -118,6 +118,24 @@ class GatewayClient {
     }
   }
 
+  async diagnose(tab = 'default') {
+    if (!this.sessionId) throw new Error('No active session. Call createSession() first.');
+    return this._fetchJson(this.baseUrl + '/session/' + this.sessionId + '/diagnose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tab })
+    }, 30000);
+  }
+
+  async recreateTab(tab = 'default') {
+    if (!this.sessionId) throw new Error('No active session. Call createSession() first.');
+    return this._fetchJson(this.baseUrl + '/session/' + this.sessionId + '/tab/recreate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tab })
+    }, 30000);
+  }
+
   async closeSession() {
     if (this.sessionId) {
       try {
