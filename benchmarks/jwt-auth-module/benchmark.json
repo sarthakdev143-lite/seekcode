@@ -1,0 +1,7 @@
+{
+  "id": "jwt-auth-module",
+  "task": "Implement a JWT auth module with signToken and verifyToken exports using jsonwebtoken.",
+  "successCriteria": ["Exports signToken and verifyToken", "Rejects invalid tokens", "Preserves user id"],
+  "validationCommands": { "build": "node -c auth.js", "test": "node validate.js" },
+  "expectedOutputs": [{ "file": "auth.js", "contains": "verifyToken" }]
+}

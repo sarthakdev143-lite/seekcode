@@ -1,0 +1,8 @@
+{
+  "id": "malformed-tool-call",
+  "task": "Recover from a malformed tool call transcript by extracting the intended file edit and applying it safely.",
+  "validationCommands": { "build": "node -c repair.js", "test": "node validate.js" },
+  "expectedOutputs": [
+    { "file": "repair.js", "contains": "status: 'recovered'" }
+  ]
+}

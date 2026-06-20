@@ -1,0 +1,7 @@
+{
+  "id": "express-crud-api",
+  "task": "Implement an Express CRUD API for todos with list, create, update, and delete endpoints.",
+  "successCriteria": ["All CRUD routes exist", "State changes are observable through HTTP responses", "Validation command exits 0"],
+  "validationCommands": { "build": "node -c server.js", "test": "node validate.js" },
+  "expectedOutputs": [{ "file": "server.js", "contains": "app.delete('/todos/:id'" }]
+}
