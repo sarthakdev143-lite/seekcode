@@ -6,6 +6,7 @@ const { collectUserInput, expandFileReferences, printInputHelp } = require('./in
 const logger = require('./logger');
 const chalk = require('chalk');
 const ora = require('ora');
+const pkg = require('../package.json');
 
 function createReadlineInterface() {
   return readline.createInterface({
@@ -14,6 +15,19 @@ function createReadlineInterface() {
     terminal: process.stdin.isTTY,
     historySize: 200,
   });
+}
+
+function renderBox(lines, color = chalk.cyan, pad = 1) {
+  const maxLen = Math.max(...lines.map(l => l.length));
+  const width = maxLen + pad * 2 + 2;
+  const border = color('─'.repeat(width - 2));
+  const top = color('┌' + border + '┐');
+  const bottom = color('└' + border + '┘');
+  const content = lines.map(line => {
+    const space = ' '.repeat(width - 2 - pad * 2 - line.length);
+    return color('│' + ' '.repeat(pad) + line + space + ' '.repeat(pad) + '│');
+  });
+  return [top, ...content, bottom].join('\n');
 }
 
 /**
@@ -29,15 +43,20 @@ async function interactiveMode(projectPath, options = {}) {
     options.setCurrentAgent(agent);
   }
 
-  console.log(chalk.cyan.bold('SeekCode') + ' | ' + chalk.white('Agentic CLI') + '\n');
+  // Welcome box
+  const welcomeLines = [
+    chalk.bold('SeekCode v' + pkg.version),
+    chalk.dim('Agentic AI Coding Assistant'),
+    chalk.dim('Project: ' + chalk.white(projectPath)),
+  ];
+  console.log(renderBox(welcomeLines, chalk.cyan) + '\n');
 
   const spinner = ora('Initializing agent...').start();
   try {
     await agent.init();
     spinner.stop();
     console.log(
-      chalk.green('✔') + ' Agent ready. Project: ' +
-      chalk.bold(agent.analyzer.getSummary().project) + '\n'
+      chalk.green('✔') + ' Agent ready. ' + chalk.bold(agent.analyzer.getSummary().project) + '\n'
     );
   } catch (err) {
     spinner.fail('Agent initialization failed');
@@ -53,7 +72,11 @@ async function interactiveMode(projectPath, options = {}) {
     console.log(chalk.dim('     (full per-iteration tool call & LLM logs are here)'));
   }
   console.log('');
+
+  // Help box
+  console.log(chalk.dim('  ' + '─'.repeat(50)));
   printInputHelp();
+  console.log(chalk.dim('  ' + '─'.repeat(50)) + '\n');
 
   const rl = createReadlineInterface();
 

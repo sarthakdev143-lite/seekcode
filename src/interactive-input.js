@@ -8,7 +8,7 @@ const chalk = require('chalk');
 
 const END_MARKER = '---END---';
 
-function readSingleLine(rl, prompt = chalk.cyan('❯ ')) {
+function readSingleLine(rl, prompt = chalk.bgCyan.black(' SEEKCODE ') + ' ' + chalk.cyan('❯ ')) {
   return new Promise((resolve, reject) => {
     const onLine = (line) => {
       cleanup();
@@ -301,21 +301,32 @@ async function handleSlashCommand(commandLine, rl, projectPath) {
 
 function printInputHelp() {
   console.log('');
-  console.log(chalk.cyan.bold('  Input commands'));
-  console.log(chalk.dim('  ─────────────────────────────────────────────────'));
-  console.log(`  ${chalk.white(':paste')} or ${chalk.white(':p')}     Paste logs / multi-line text (${END_MARKER} to finish)`);
-  console.log(`  ${chalk.white(':clip')}              Load directly from system clipboard`);
-  console.log(`  ${chalk.white(':edit')} or ${chalk.white(':e')}      Compose in external editor (Notepad / $EDITOR)`);
-  console.log(`  ${chalk.white(':load <path>')}       Load a file into context`);
-  console.log(`  ${chalk.white(':logs [n]')}          Pick a recent trace/log file`);
-  console.log(`  ${chalk.white('@file')}             Inline file reference (supports quotes: @"path with spaces")`);
-  console.log(`  ${chalk.white(':help')}             Show this help`);
-  console.log(chalk.dim('  ─────────────────────────────────────────────────'));
-  console.log(chalk.dim('  Tip: For pasted CI logs, use :clip or :paste — not plain Enter.\n'));
+  const lines = [
+    chalk.bold('  Input Commands'),
+    '',
+    `  ${chalk.white(':paste')} or ${chalk.white(':p')}     Paste logs / multi-line text (${END_MARKER} to finish)`,
+    `  ${chalk.white(':clip')}              Load directly from system clipboard`,
+    `  ${chalk.white(':edit')} or ${chalk.white(':e')}      Compose in external editor (Notepad / $EDITOR)`,
+    `  ${chalk.white(':load <path>')}       Load a file into context`,
+    `  ${chalk.white(':logs [n]')}          Pick a recent trace/log file`,
+    `  ${chalk.white('@file')}             Inline file reference (supports quotes: @"path with spaces")`,
+    `  ${chalk.white(':help')}             Show this help`,
+    `  ${chalk.white('exit')} or ${chalk.white('quit')} or ${chalk.white('q')}  Exit`,
+    '',
+    chalk.dim('  Tip: For pasted CI logs, use :clip or :paste — not plain Enter.'),
+  ];
+  lines.forEach(line => console.log(line));
 }
 
 function printInputBanner() {
-  console.log(chalk.dim('  Input: Enter=send line  │  :paste=logs  │  :clip=clipboard  │  :edit=editor  │  :help'));
+  console.log(
+    chalk.dim('  Input: ') +
+    chalk.cyan('Enter') + chalk.dim('=send  │ ') +
+    chalk.cyan(':paste') + chalk.dim('=logs  │ ') +
+    chalk.cyan(':clip') + chalk.dim('=clipboard  │ ') +
+    chalk.cyan(':edit') + chalk.dim('=editor  │ ') +
+    chalk.cyan(':help')
+  );
 }
 
 /**
