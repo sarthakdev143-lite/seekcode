@@ -2,7 +2,7 @@ const chalk = require('chalk');
 const { marked } = require('marked');
 const TerminalRenderer = require('marked-terminal').default;
 
-// Configure marked to render to the terminal
+// Configure marked to render to the terminal (kept for renderMarkdown)
 marked.setOptions({
   renderer: new TerminalRenderer({
     code: chalk.yellow,
@@ -23,26 +23,26 @@ marked.setOptions({
   })
 });
 
-module.exports = {
-  info(msg)    { console.log(chalk.blue('i') + ' ' + msg); },
-  success(msg) { console.log(chalk.green('√') + ' ' + msg); },
-  warn(msg)    { console.log(chalk.yellow('⚠') + ' ' + msg); },
-  error(msg)   { console.log(chalk.red('X') + ' ' + msg); },
-  header(msg)  { console.log('\n' + chalk.cyan.bold(msg)); },
-  dim(msg)     { console.log(chalk.dim(msg)); },
-  
-  // New Topic Bar style
-  topic(title, intent) {
-    console.log('\n' + chalk.bgBlue.white.bold(` TOPIC `) + ' ' + chalk.blue.bold(title));
-    if (intent) {
-      console.log(chalk.dim('↳ ' + intent));
-    }
-  },
-  
-  divider() {
-    console.log(chalk.dim('─'.repeat(process.stdout.columns || 50)));
-  },
+const timestamp = () => new Date().toISOString();
 
+function log(level, message, extra = {}) {
+  const entry = { timestamp: timestamp(), level, message, ...extra };
+  console.log(JSON.stringify(entry));
+}
+
+module.exports = {
+  info(msg, extra) { log('info', msg, extra); },
+  success(msg, extra) { log('success', msg, extra); },
+  warn(msg, extra) { log('warn', msg, extra); },
+  error(msg, extra) { log('error', msg, extra); },
+  header(msg, extra) { log('header', msg, extra); },
+  dim(msg, extra) { log('dim', msg, extra); },
+  topic(title, intent) { 
+    log('topic', title, { intent }); 
+  },
+  divider() { 
+    log('divider', '─'.repeat(50)); 
+  },
   renderMarkdown(text) {
     return marked(text);
   }
