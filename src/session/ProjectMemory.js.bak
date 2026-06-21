@@ -9,11 +9,6 @@ const path = require('path');
 
 const MEMORY_VERSION = 3;
 
-// Cap on the number of file entries kept in changedFiles. Without this the map
-// grows unbounded over a long-lived project. The situation report only renders
-// the top ~8 (getMostChangedFiles default), so 200 is generous headroom.
-const MAX_CHANGED_FILES = 200;
-
 class ProjectMemory {
   /**
    * @param {string} projectPath  Absolute path to the project root
@@ -166,19 +161,6 @@ class ProjectMemory {
       }
       this.data.changedFiles[rel].lastChangedAt = now;
       this.data.changedFiles[rel].changeCount++;
-    }
-    // Bound the map so a long-lived project doesn't accumulate thousands of
-    // stale entries. Keep the top MAX_CHANGED_FILES by changeCount (most
-    // relevant for the situation report); ties broken by recency.
-    const entries = Object.entries(this.data.changedFiles);
-    if (entries.length > MAX_CHANGED_FILES) {
-      entries
-        .sort(([, a], [, b]) =>
-          (b.changeCount - a.changeCount) ||
-          (new Date(b.lastChangedAt) - new Date(a.lastChangedAt))
-        )
-        .slice(MAX_CHANGED_FILES) // the dropped tail
-        .forEach(([file]) => { delete this.data.changedFiles[file]; });
     }
     this._save();
   }
