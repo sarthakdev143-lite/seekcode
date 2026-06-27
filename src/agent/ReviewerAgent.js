@@ -29,14 +29,47 @@ class ReviewerAgent {
 
     const tab = options.tab || 'reviewer';
     const response = await this.gateway.chat(prompt, tab, 'R1');
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { passed: false, findings: ['Reviewer returned invalid JSON'] };
     try {
-      const parsed = JSON.parse(jsonMatch[0]);
+      const parsed = JSON.parse(this._extractJsonObject(response));
       return { passed: Boolean(parsed.passed), findings: Array.isArray(parsed.findings) ? parsed.findings : [] };
     } catch (err) {
       return { passed: false, findings: ['Reviewer returned malformed JSON: ' + err.message] };
     }
+  }
+
+  _extractJsonObject(text) {
+    const cleaned = String(text || '')
+      .replace(/<think[^>]*>[\s\S]*?<\/think>/gi, '')
+      .replace(/```(?:json)?/gi, '')
+      .replace(/```/g, '')
+      .trim();
+    const start = cleaned.indexOf('{');
+    if (start === -1) throw new Error('No JSON object found');
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < cleaned.length; i++) {
+      const ch = cleaned[i];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (ch === '{') depth++;
+      if (ch === '}') {
+        depth--;
+        if (depth === 0) return cleaned.slice(start, i + 1);
+      }
+    }
+    throw new Error('Unbalanced JSON object');
   }
 }
 

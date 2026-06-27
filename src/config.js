@@ -9,6 +9,7 @@ module.exports = {
   MAX_FILE_SIZE_BYTES: 5 * 1024 * 1024,
   PARSE_CONCURRENCY: 4,
   MAX_CONTEXT_TOKENS: 1000000,
+  RUN_BUDGET_MS: Number(process.env.SEEKCODE_RUN_BUDGET_MS || 60 * 60 * 1000),
   SECURITY_POLICY: {
     approvalRequired: { delete: true, writeOutsideProject: true, network: true, shell: true, install: true },
     allowNetwork: false,

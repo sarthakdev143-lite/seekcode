@@ -14,7 +14,12 @@ function getParser(fp) {
 function parseFile(filePath) {
   const parser = getParser(filePath);
   const code = fs.readFileSync(filePath, 'utf8');
-  const tree = parser.parse(code);
+  let tree;
+  try {
+    tree = parser.parse(code);
+  } catch (err) {
+    return fallbackParseFile(filePath, code);
+  }
   const root = tree.rootNode;
   const imports = [];
   const exports = [];
@@ -95,6 +100,58 @@ function parseFile(filePath) {
   }
 
   walk(root);
+  return { imports, exports, declarations };
+}
+
+function fallbackParseFile(filePath, code) {
+  const imports = [];
+  const exports = [];
+  const declarations = [];
+  const lines = code.split(/\r?\n/);
+
+  const addDeclaration = (name, kind, line, signature = name) => {
+    if (!name) return;
+    declarations.push({ file: filePath, name, kind, line, signature });
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const lineNo = i + 1;
+    const line = lines[i];
+
+    let m = line.match(/\brequire\(\s*['"]([^'"]+)['"]\s*\)/);
+    if (m) imports.push({ file: filePath, module: m[1], names: [], isDefault: false });
+
+    m = line.match(/^\s*import\s+(.+?)\s+from\s+['"]([^'"]+)['"]/);
+    if (m) {
+      imports.push({
+        file: filePath,
+        module: m[2],
+        names: m[1].replace(/[{}]/g, '').split(',').map(s => s.trim()).filter(Boolean),
+        isDefault: !m[1].trim().startsWith('{'),
+      });
+    }
+
+    m = line.match(/^\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(\([^)]*\))/);
+    if (m) addDeclaration(m[1], 'function', lineNo, `${m[1]}${m[2]}`);
+
+    m = line.match(/^\s*class\s+([A-Za-z_$][\w$]*)/);
+    if (m) addDeclaration(m[1], 'class', lineNo, `class ${m[1]}`);
+
+    m = line.match(/^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/);
+    if (m) addDeclaration(m[1], 'variable_declarator', lineNo, m[1]);
+
+    m = line.match(/^\s*module\.exports\s*=\s*\{([^}]*)/);
+    if (m) {
+      for (const name of m[1].split(',').map(s => s.trim()).filter(Boolean)) {
+        const clean = name.split(':')[0].trim();
+        exports.push({ file: filePath, name: clean, kind: 'commonjs', line: lineNo, signature: clean });
+      }
+    }
+
+    m = line.match(/^\s*exports\.([A-Za-z_$][\w$]*)\s*=/);
+    if (m) exports.push({ file: filePath, name: m[1], kind: 'commonjs', line: lineNo, signature: m[1] });
+  }
+
   return { imports, exports, declarations };
 }
 

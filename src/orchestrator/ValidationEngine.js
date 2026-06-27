@@ -186,6 +186,57 @@ class ValidationEngine {
     );
   }
 
+  async runChangedFileChecks(options = {}) {
+    const changedFiles = Array.isArray(options.changedFiles) ? options.changedFiles : [];
+    const files = [...new Set(changedFiles)]
+      .map(f => path.isAbsolute(f) ? f : path.join(this.projectDir, f))
+      .filter(f => fs.existsSync(f) && fs.statSync(f).isFile());
+
+    if (files.length === 0) {
+      return { success: true, skipped: true, phase: 'changed-files', message: 'No changed files to check' };
+    }
+
+    const runs = [];
+
+    for (const file of files.filter(f => /\.(?:js|mjs|cjs)$/i.test(f))) {
+      const rel = path.relative(this.projectDir, file).replace(/\\/g, '/');
+      runs.push(await this.runCommand(`node --check "${file}"`, {
+        ...options,
+        quiet: true,
+        timeoutMs: Math.min(options.timeoutMs || this.timeoutMs, 60_000),
+      }).then(r => ({ phase: 'syntax', file: rel, ...r })));
+    }
+
+    for (const file of files.filter(f => /\.json$/i.test(f))) {
+      const rel = path.relative(this.projectDir, file).replace(/\\/g, '/');
+      try {
+        JSON.parse(fs.readFileSync(file, 'utf8'));
+        runs.push({ success: true, phase: 'json', file: rel, command: 'JSON.parse' });
+      } catch (err) {
+        runs.push({ success: false, phase: 'json', file: rel, command: 'JSON.parse', error: err.message, output: err.message });
+      }
+    }
+
+    if (runs.length === 0) {
+      return { success: true, skipped: true, phase: 'changed-files', message: 'No direct changed-file checks available' };
+    }
+
+    const failed = runs.find(r => !r.success);
+    if (failed) {
+      return {
+        success: false,
+        phase: failed.phase || 'changed-files',
+        file: failed.file,
+        command: failed.command,
+        output: failed.output,
+        error: failed.error || `${failed.file} failed validation`,
+        runs,
+      };
+    }
+
+    return { success: true, phase: 'changed-files', runs };
+  }
+
   _parseError(output) {
     const lines = output.split('\n');
     const relevant = lines.filter(line =>
@@ -209,6 +260,22 @@ class ValidationEngine {
     runs.push(testResult);
     if (!testResult.success) {
       return { success: false, phase: 'test', output: testResult.output, error: testResult.error, runs };
+    }
+
+    const buildSkipped = buildResult.skipped === true;
+    const testsSkipped = testResult.skipped === true;
+    if (buildSkipped || testsSkipped) {
+      const changedFileResult = await this.runChangedFileChecks(options);
+      runs.push(changedFileResult);
+      if (!changedFileResult.success) {
+        return {
+          success: false,
+          phase: changedFileResult.phase,
+          output: changedFileResult.output,
+          error: changedFileResult.error,
+          runs,
+        };
+      }
     }
 
     // Run runtime validation if port is specified

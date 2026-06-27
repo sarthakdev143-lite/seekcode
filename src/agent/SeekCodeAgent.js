@@ -169,24 +169,23 @@ class SeekCodeAgent {
   }
 
   async _handleSingleEdit(input, agenticBase) {
-    const context = this.contextManager.buildContextForLLM({ maxRecentTurns: 4 });
-    const prompt = [
-      agenticBase,
-      '',
-      'TASK: ' + input,
-      '',
-      'STEPS:',
-      '1. Research: Read the file and understand its purpose.',
-      '2. Plan: Explain what you will change.',
-      '3. Act: Use surgical tools.',
-      '4. Verify: Run a check.',
-      context ? '\nRECENT CONVERSATION:\n' + context : '',
-    ].join('\n');
     this.contextManager.addMessage('user', input);
-    const response = await this._callLLMWithTrace(prompt, '_handleSingleEdit');
-    this.contextManager.addMessage('assistant', response);
-    this._addToHistory('assistant', response);
-    return response;
+    logger.info('Edit task detected — routing through orchestrator for tool execution and validation.');
+
+    const { EnhancedOrchestrator } = require('../orchestrator/EnhancedOrchestrator');
+    const orchestrator = new EnhancedOrchestrator(this.projectPath);
+
+    try {
+      await orchestrator.init();
+      const result = await orchestrator.run(input, {});
+      this.contextManager.addMessage('assistant', result);
+      this._addToHistory('assistant', result);
+      await this.analyzer.analyze();
+      return result;
+    } catch (err) {
+      logger.error(`Orchestrator failed: ${err.message}`);
+      throw err;
+    }
   }
 
   async _handleMultiStep(input, agenticBase) {

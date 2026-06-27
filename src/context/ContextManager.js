@@ -187,6 +187,8 @@ class RelevantFileTracker {
     this.fileScores = new Map();
     this.fileContents = new Map();
     this.maxCacheSize = 50;
+    this.maxScanFiles = 250;
+    this.maxSearchBytes = 120_000;
   }
 
   scoreRelevance(taskDescription, filePaths) {
@@ -197,7 +199,7 @@ class RelevantFileTracker {
         .filter(w => w.length > 2)
     );
     const scores = [];
-    for (const fp of filePaths) {
+    filePaths.forEach((fp, index) => {
       const basename = path.basename(fp).toLowerCase();
       const relPath = path.relative(this.projectPath, fp).toLowerCase();
       let score = 0;
@@ -205,17 +207,39 @@ class RelevantFileTracker {
         if (basename.includes(word)) score += 10;
         if (relPath.includes(word)) score += 5;
       }
+      if (index < this.maxScanFiles) this._maybeCacheForScoring(fp);
       if (this.fileContents.has(fp)) {
         const content = this.fileContents.get(fp).toLowerCase();
         for (const word of taskWords) {
-          const count = (content.match(new RegExp(word, 'g')) || []).length;
+          const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const count = (content.match(new RegExp(escaped, 'g')) || []).length;
           score += count * 2;
         }
       }
       this.fileScores.set(fp, score);
       if (score > 0) scores.push({ path: fp, score });
-    }
+    });
     return scores.sort((a,b) => b.score - a.score);
+  }
+
+  _maybeCacheForScoring(filePath) {
+    if (this.fileContents.has(filePath)) return;
+    try {
+      if (!fs.existsSync(filePath)) return;
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile() || stat.size > this.maxSearchBytes) return;
+      const ext = path.extname(filePath).toLowerCase();
+      const textLike = new Set([
+        '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.json', '.md',
+        '.css', '.scss', '.html', '.yml', '.yaml', '.toml', '.txt'
+      ]);
+      if (!textLike.has(ext)) return;
+      const content = fs.readFileSync(filePath, 'utf8');
+      if (content.includes('\u0000')) return;
+      this.cacheFileContent(filePath, content);
+    } catch {
+      // Relevance scoring must never block the agent loop.
+    }
   }
 
   cacheFileContent(filePath, content) {
@@ -446,7 +470,10 @@ class ContextManager {
       const content = this.fileTracker.fileContents.get(fp);
       if (content) {
         const preview = content.split('\n').slice(0, 30).join('\n');
-        lines.push(`\n--- ${path.basename(fp)} ---\n${preview}`);
+        const label = this.projectPath
+          ? path.relative(this.projectPath, fp).replace(/\\/g, '/')
+          : path.basename(fp);
+        lines.push(`\n--- ${label} ---\n${preview}`);
       }
     }
     return lines.join('\n');

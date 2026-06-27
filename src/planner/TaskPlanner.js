@@ -96,11 +96,11 @@ class TaskPlanner {
     ].join('\n');
 
     const response = await this.gateway.chat(planningPrompt, 'planner', 'R1');
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('Invalid LLM plan response');
-
-    const rawPlan = JSON.parse(jsonMatch[0]);
+    const rawPlan = this._parseJsonFromResponse(response, 'object');
     const steps = rawPlan.steps;
+    if (!Array.isArray(steps) || steps.length === 0) {
+      throw new Error('LLM plan response did not contain non-empty steps');
+    }
 
     // ── OPTION B: Dry-Run Annotation Pass ────────────────────────────────────
     // After generating the step list, do a second LLM round-trip that asks the
@@ -174,10 +174,7 @@ class TaskPlanner {
       .replace(/```/g, '')
       .trim();
 
-    const arrMatch = cleaned.match(/\[[\s\S]*\]/);
-    if (!arrMatch) throw new Error('Annotation response did not contain a JSON array');
-
-    const annotated = JSON.parse(arrMatch[0]);
+    const annotated = this._parseJsonFromResponse(cleaned, 'array');
 
     // Validate shape — must be array of objects with description/reads/writes
     if (!Array.isArray(annotated) || annotated.length !== steps.length) {
@@ -197,6 +194,83 @@ class TaskPlanner {
         writes: Array.isArray(item.writes) ? item.writes : (Array.isArray(original.writes) ? original.writes : []),
       };
     });
+  }
+
+  _parseJsonFromResponse(response, expectedType) {
+    const cleaned = String(response || '')
+      .replace(/<think[^>]*>[\s\S]*?<\/think>/gi, '')
+      .replace(/```(?:json)?/gi, '')
+      .replace(/```/g, '')
+      .trim();
+
+    const extracted = expectedType === 'array'
+      ? this._extractBalanced(cleaned, '[', ']')
+      : this._extractBalanced(cleaned, '{', '}');
+    if (!extracted) {
+      throw new Error(`Invalid LLM response: expected JSON ${expectedType}`);
+    }
+
+    try {
+      const parsed = this._safeJsonParse(extracted);
+      if (expectedType === 'array' && !Array.isArray(parsed)) {
+        throw new Error('Expected JSON array');
+      }
+      if (expectedType === 'object' && (!parsed || Array.isArray(parsed) || typeof parsed !== 'object')) {
+        throw new Error('Expected JSON object');
+      }
+      return parsed;
+    } catch (err) {
+      throw new Error(`Invalid JSON from planner: ${err.message}`);
+    }
+  }
+
+  _safeJsonParse(raw) {
+    try { return JSON.parse(raw); } catch {}
+    const withoutTrailingCommas = raw.replace(/,\s*([}\]])/g, '$1');
+    try { return JSON.parse(withoutTrailingCommas); } catch {}
+    const withoutComments = withoutTrailingCommas
+      .replace(/\/\/.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+    return JSON.parse(withoutComments);
+  }
+
+  _extractBalanced(text, open, close) {
+    const start = text.indexOf(open);
+    if (start === -1) return null;
+    let depth = 0;
+    let inString = false;
+    let quote = null;
+    let escaped = false;
+
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (inString) {
+        if (ch === quote) {
+          inString = false;
+          quote = null;
+        }
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        inString = true;
+        quote = ch;
+        continue;
+      }
+      if (ch === open) depth++;
+      if (ch === close) {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
+      }
+    }
+    return null;
   }
 
   // -- Rule-based (original) --

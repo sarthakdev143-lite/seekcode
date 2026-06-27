@@ -144,6 +144,8 @@ class EnhancedOrchestrator {
     this.contextManager.reset();
     this.contextManager.setTask(task);
     this.contextManager.addMessage('user', `Overall Task: ${task}`);
+    this.runStartedAt = Date.now();
+    this.runBudgetMs = Number(options.runBudgetMs || config.RUN_BUDGET_MS || 0);
 
     // Score all project files
     if (this.contextManager.fileTracker) {
@@ -437,6 +439,7 @@ class EnhancedOrchestrator {
   }
 
   async _executeStep(index, step, totalSteps, task, baseContext) {
+    this._assertRunBudget(`before step ${index + 1}`);
     const stepText = this._stepText(step);
     const stepStart = Date.now();
     const before = this._snapshotWorkspace();
@@ -497,9 +500,10 @@ class EnhancedOrchestrator {
     const prompt = [
       'You are SeekCode, a senior agentic software engineer. Follow this disciplined cycle:',
       '',
-      '1. STRATEGY: Explain your planned changes concisely in the SAME turn as your tool call(s). Do NOT output a prose-only response without any tool calls, as this will prematurely end the step.',
-      '2. EXECUTION: Use surgical tools (replace_in_file) or write multiple files at once using write_files. You can also output multiple tool calls (e.g. multiple write_file or replace_in_file calls) in a single response to perform changes in parallel. Avoid full-file rewrites unless creating a new file.',
-      '3. VALIDATION: After making changes, run tests or build to verify they work.',
+      '1. RESEARCH: Use read/search/symbol tools if more evidence is needed.',
+      '2. EXECUTION: Use surgical tools (replace_in_file) or write multiple files at once using write_files. You can also output multiple tool calls in a single response. Avoid full-file rewrites unless creating a new file.',
+      '3. VALIDATION: After making changes, run tests, build, or a targeted check.',
+      'Do not mix prose with tool_call blocks. If work remains, output only tool_call block(s).',
       '',
       'PROJECT CONTEXT:',
       baseContext,
@@ -507,7 +511,7 @@ class EnhancedOrchestrator {
       'CONVERSATION AND RESEARCH CONTEXT:',
       dynamicConversationContext,
       '',
-      'CRITICAL: If the current step is not fully complete and verified, you MUST output a tool_call block. Do NOT write a plain prose response without tool calls until you are completely finished with this step.',
+      'CRITICAL: If the current step is not fully complete and verified, you MUST output tool_call block(s). Do NOT write a plain prose response without tool calls until you are completely finished with this step.',
       'If you identify a bug during implementation, fix it immediately.',
       'Be thorough. If you fail to fix an issue in 3 attempts, backtrack and re-evaluate your strategy.'
     ].join('\n');
@@ -521,6 +525,7 @@ class EnhancedOrchestrator {
       const result = this.stallDetector
         ? await this.stallDetector.runStepWithRecovery({ index: index + 1, step: stepText, tab: this.options?.tab ? `coder-${this.options.tab}` : 'coder' }, executeOnce)
         : await executeOnce();
+      this._assertRunBudget(`after step ${index + 1}`);
 
       // Record assistant executor completion
       this.contextManager.addMessage('assistant', result);
@@ -597,14 +602,23 @@ class EnhancedOrchestrator {
     if (currentStep && this.contextManager.fileTracker) {
       const filePaths = this.analyzer.getDependencyGraph().getAllFiles().map(f => path.resolve(this.projectPath, f));
       this.contextManager.fileTracker.scoreRelevance(currentStep, filePaths);
-      const topFiles = this.contextManager.fileTracker.getTopRelevantFiles(10);
+      const lexicalFiles = this.contextManager.fileTracker.getTopRelevantFiles(8)
+        .map(fp => path.relative(this.projectPath, fp).replace(/\\/g, '/'));
+      const semanticFiles = this.semanticSearch
+        ? this.semanticSearch.search(currentStep, 8).map(r => r.path)
+        : [];
+      const topFiles = [...new Set([...lexicalFiles, ...semanticFiles])].slice(0, 12);
       if (topFiles.length > 0) {
-        relevantFilesText = '\nTop Relevant Files for this step:\n' + topFiles.map(fp => {
-          const rel = path.relative(this.projectPath, fp).replace(/\\/g, '/');
+        relevantFilesText = '\nTop Relevant Files for this step:\n' + topFiles.map(rel => {
           let sigs = '';
           const entry = this.repositoryMap?.map?.files[rel];
-          if (entry && entry.exports) {
-            sigs = ` (exports: ${entry.exports.join(', ')})`;
+          if (entry) {
+            const exports = (entry.exports || []).slice(0, 8);
+            const symbols = (entry.symbols || []).slice(0, 6).map(s => s.signature || s.name);
+            const details = [];
+            if (exports.length) details.push(`exports: ${exports.join(', ')}`);
+            if (symbols.length) details.push(`symbols: ${symbols.join('; ')}`);
+            if (details.length) sigs = ` (${details.join(' | ')})`;
           }
           return `- ${rel}${sigs}`;
         }).join('\n');
@@ -665,6 +679,16 @@ class EnhancedOrchestrator {
     this.currentTopic = { title, intent, timestamp: new Date().toISOString() };
     if (this.traceLogger) this.traceLogger.logEvent('topic_update', this.currentTopic);
     logger.topic(title, intent);
+  }
+
+  _assertRunBudget(where = 'run') {
+    if (!this.runBudgetMs || !this.runStartedAt) return;
+    const elapsed = Date.now() - this.runStartedAt;
+    if (elapsed > this.runBudgetMs) {
+      const mins = Math.round(elapsed / 60000);
+      const budgetMins = Math.round(this.runBudgetMs / 60000);
+      throw new Error(`Run budget exhausted at ${where}: ${mins}min elapsed > ${budgetMins}min budget`);
+    }
   }
 
   async _generateProposal(task, plan) {

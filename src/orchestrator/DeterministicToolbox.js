@@ -69,13 +69,12 @@ class DeterministicToolbox {
       }
     });
 
-    const validationCommand = plan.validationCommand || this.validator?.testCommand || this.validator?.buildCommand;
-    if (!validationCommand) errors.push('Plan is missing a validation command and none was auto-detected.');
+    const validationCommand = plan.validationCommand || this.validator?.testCommand || this.validator?.buildCommand || 'changed-file checks';
 
     return {
       success: errors.length === 0,
       errors,
-      validationCommand: validationCommand || null,
+      validationCommand,
     };
   }
 
