@@ -1,4 +1,6 @@
 ﻿const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 const logger = require('../logger');
 
 class GitManager {
@@ -48,6 +50,82 @@ class GitManager {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Ensure a path is ignored by git. Appends it to .gitignore (creating the
+   * file if missing) only if it isn't already ignored or already present.
+   *
+   * Idempotent and never throws — safe to call on every project init. We check
+   * `git check-ignore` first so we don't duplicate entries already covered by a
+   * glob or a parent ignore rule, and we resolve the .gitignore at the repo
+   * root (where ignore rules actually live), not the working subdir.
+   *
+   * @param {string} relPath — repo-relative path to ignore (e.g. '.seekcode')
+   * @returns {boolean} true if the path is now ignored (already was, or we just added it)
+   */
+  ensureIgnored(relPath) {
+    if (!relPath || !this.isRepo()) return false;
+
+    // Already ignored (by a glob, a parent rule, or a prior run)? Done.
+    if (this._isIgnored(relPath)) return true;
+
+    try {
+      const gitignorePath = this._gitignorePath();
+      const existing = fs.existsSync(gitignorePath)
+        ? fs.readFileSync(gitignorePath, 'utf8')
+        : '';
+
+      // Avoid duplicate lines if a literal entry already exists.
+      const alreadyListed = existing
+        .split(/\r?\n/)
+        .map(l => l.trim())
+        .includes(relPath);
+      if (alreadyListed) return true;
+
+      const prefix = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+      const trailer = existing.endsWith('\n') ? '\n' : '\n';
+      fs.writeFileSync(
+        gitignorePath,
+        existing + `${prefix}# SeekCode agent state (sessions, checkpoints, memory)\n${relPath}${trailer}`,
+        'utf8'
+      );
+      logger.info(`Added "${relPath}" to .gitignore`);
+      return true;
+    } catch (err) {
+      logger.warn(`Could not update .gitignore for "${relPath}": ${err.message}`);
+      return false;
+    }
+  }
+
+  /** True if git currently ignores the given repo-relative path. */
+  _isIgnored(relPath) {
+    try {
+      const out = execSync(`git check-ignore "${relPath}"`, {
+        cwd: this.projectDir, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      return out.length > 0;
+    } catch {
+      // Non-zero exit means git does NOT ignore it (or git errored). Treat as
+      // "not ignored" so we attempt the append; ensureIgnored is idempotent.
+      return false;
+    }
+  }
+
+  /** Absolute path to the repo-root .gitignore. */
+  _gitignorePath() {
+    const root = this._repoRoot();
+    return path.join(root, '.gitignore');
+  }
+
+  _repoRoot() {
+    try {
+      return execSync('git rev-parse --show-toplevel', {
+        cwd: this.projectDir, encoding: 'utf8',
+      }).trim();
+    } catch {
+      return this.projectDir; // fall back to the configured project dir
     }
   }
 }

@@ -51,6 +51,12 @@ class SeekCodeAgent {
     await this.analyzer.analyze();
     await this.gateway.createSession();
 
+    // Keep SeekCode's own state dir out of the user's git history. Idempotent.
+    try {
+      const { GitManager } = require('../git/GitManager');
+      new GitManager(this.projectPath).ensureIgnored('.seekcode');
+    } catch { /* non-fatal */ }
+
     // Record the gateway session log path in the seekcode trace so it's
     // easy to find the rich per-iteration logs when debugging.
     if (this.traceLogger && this.gateway.sessionLogPath) {

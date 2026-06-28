@@ -105,6 +105,9 @@ class EnhancedOrchestrator {
     this.refactorEngine = new RefactorEngine(this.analyzer);
     this.testRunner = new TestRunner(this.projectPath);
     this.gitManager = new GitManager(this.projectPath);
+    // Keep SeekCode's own state dir out of the user's git history. Runs once on
+    // init; idempotent (no-op if .seekcode is already ignored or no repo exists).
+    this.gitManager.ensureIgnored('.seekcode');
     this.validator = new ValidationEngine(this.projectPath);
     this.deterministicTools = new DeterministicToolbox(this.projectPath, this.analyzer, this.validator);
     this.selfHealing = new SelfHealingOrchestrator(this.projectPath);
@@ -717,6 +720,10 @@ class EnhancedOrchestrator {
   }
 
   _snapshotWorkspace() {
+    // Hash file CONTENT, not mtime+size. mtime flips on any touch (build tooling,
+    // formatters, a no-op rewrite) and a same-mtime rewrite is invisible to it,
+    // so "did this step change anything?" was unreliable. Content hashing is
+    // exact: unchanged bytes → same signature, regardless of timestamp.
     const files = [];
     const skip = new Set(['.git', 'node_modules', '.seekcode']);
     const walk = dir => {
@@ -729,13 +736,28 @@ class EnhancedOrchestrator {
           files.push({
             file: path.relative(this.projectPath, abs).replace(/\\/g, '/'),
             size: stat.size,
-            mtimeMs: stat.mtimeMs
+            hash: this._contentHash(abs, stat.size)
           });
         }
       }
     };
     walk(this.projectPath);
-    return new Map(files.map(f => [f.file, crypto.createHash('sha1').update(`${f.size}:${f.mtimeMs}`).digest('hex')]));
+    return new Map(files.map(f => [f.file, f.hash]));
+  }
+
+  /**
+   * SHA-1 of file content, or `size:<n>` if the file is too large to read
+   * wholesale (avoids hashing multi-MB generated artifacts on every snapshot).
+   * Large files are unlikely to be the agent's own source edits, and size is a
+   * stable enough proxy for them. Returns '' if the file vanishes mid-walk.
+   */
+  _contentHash(absPath, size) {
+    if (size > 5 * 1024 * 1024) return `size:${size}`;
+    try {
+      return crypto.createHash('sha1').update(fs.readFileSync(absPath)).digest('hex');
+    } catch {
+      return `size:${size}`; // read failed (binary/encoding) → fall back
+    }
   }
 
   _diffSnapshot(before, after) {
